@@ -86,6 +86,7 @@ export interface ISandbox {
   module: NodeModule
   require: (p: string) => any
   console: { [key in keyof Console]?: Function }
+  Buffer: any
   Reflect: any
   String: any
   Promise: any
@@ -97,6 +98,7 @@ function createSandbox(filename: string, logger: Logger): ISandbox {
 
   const sandbox = vm.createContext({
     module,
+    Buffer,
     console: {
       log: (...args: any[]) => {
         logger.debug.apply(logger, args)
@@ -152,29 +154,21 @@ export function createExtension(id: string, filename: string): ExtensionExport {
     // tslint:disable-next-line:no-empty
     return { activate: () => { }, deactivate: null }
   }
-  try {
-    const sandbox = createSandbox(filename, createLogger(`extension-${id}`))
+  const sandbox = createSandbox(filename, createLogger(`extension-${id}`))
 
-    delete Module._cache[requireFunc.resolve(filename)]
+  delete Module._cache[requireFunc.resolve(filename)]
 
-    // attempt to import plugin
-    // Require plugin to export activate & deactivate
-    const defaultImport = sandbox.require(filename)
-    const activate = (defaultImport && defaultImport.activate) || defaultImport
+  // attempt to import plugin
+  // Require plugin to export activate & deactivate
+  const defaultImport = sandbox.require(filename)
+  const activate = (defaultImport && defaultImport.activate) || defaultImport
 
-    if (typeof activate !== 'function') {
-      // tslint:disable-next-line:no-empty
-      return { activate: () => { }, deactivate: null }
-    }
-    return {
-      activate,
-      deactivate: typeof defaultImport.deactivate === 'function' ? defaultImport.deactivate : null
-    }
-  } catch (err) {
-    workspace.showMessage(`Error loading extension from ${filename}: ${err.message}`, 'error')
-    logger.error(err.stack)
+  if (typeof activate !== 'function') {
+    // tslint:disable-next-line:no-empty
+    return { activate: () => { }, deactivate: null }
   }
-
-  // There may have been an error, but maybe not
-  return null
+  return {
+    activate,
+    deactivate: typeof defaultImport.deactivate === 'function' ? defaultImport.deactivate : null
+  }
 }

@@ -5,6 +5,7 @@ import { ListHighlights, ListItem } from '../types'
 import { disposeAll } from '../util'
 import workspace from '../workspace'
 import ListConfiguration from './configuration'
+import debounce = require('debounce')
 const logger = require('../util/logger')('list-ui')
 
 export type MouseEvent = 'mouseDown' | 'mouseDrag' | 'mouseUp' | 'doubleClick'
@@ -62,10 +63,22 @@ export default class ListUI {
       if (timer) clearTimeout(timer)
       if (bufnr != this.bufnr) return
       let lnum = cursor[0]
-      if (this.currIndex + 1 == lnum) return
-      this.currIndex = lnum - 1
-      this._onDidChangeLine.fire(lnum)
+      if (this.currIndex + 1 != lnum) {
+        this.currIndex = lnum - 1
+        this._onDidChangeLine.fire(lnum)
+      }
     }, null, this.disposables)
+
+    events.on('CursorMoved', debounce(async bufnr => {
+      if (bufnr != this.bufnr) return
+      // if (this.length < 500) return
+      let [start, end] = await nvim.eval('[line("w0"),line("w$")]') as number[]
+      // if (end < 500) return
+      nvim.pauseNotification()
+      this.doHighlight(start - 1, end)
+      nvim.command('redraw', true)
+      await nvim.resumeNotification(false, true)
+    }, 50))
   }
 
   public set index(n: number) {
@@ -108,6 +121,20 @@ export default class ListUI {
     let idx = items.indexOf(item)
     let msg = `[${idx + 1}/${items.length}] ${item.label || ''}`
     this.nvim.callTimer('coc#util#echo_lines', [[msg]], true)
+  }
+
+  public async updateItem(item: ListItem, index: number): Promise<void> {
+    if (!this.bufnr || workspace.bufnr != this.bufnr) return
+    let obj: ListItem = Object.assign({ resolved: true }, item)
+    if (index < this.length) {
+      this.items[index] = obj
+      let { nvim } = this
+      nvim.pauseNotification()
+      nvim.command('setl modifiable', true)
+      nvim.call('setline', [index + 1, obj.label], true)
+      nvim.command('setl nomodifiable', true)
+      await nvim.resumeNotification()
+    }
   }
 
   public async getItems(): Promise<ListItem[]> {
@@ -309,11 +336,17 @@ export default class ListUI {
     }
     if (bufnr == 0 && !this.creating) {
       this.creating = true
-      let cmd = 'keepalt ' + (position == 'top' ? '' : 'botright') + ` ${height}sp list://${name || 'anonymous'}`
-      await nvim.command(cmd)
+      let saved = await nvim.call('winsaveview')
+      let cmd = 'keepalt ' + (position == 'top' ? '' : 'botright') + ` ${height}sp list:///${name || 'anonymous'}`
+      nvim.pauseNotification()
+      nvim.command(cmd, true)
+      nvim.command(`resize ${height}`, true)
+      nvim.command('wincmd p', true)
+      nvim.call('winrestview', [saved], true)
+      nvim.command('wincmd p', true)
+      await nvim.resumeNotification()
       this._bufnr = await nvim.call('bufnr', '%')
       this.window = await nvim.window
-      await this.window.request(`nvim_win_set_height`, [this.window, height])
       this.height = height
       this._onDidOpen.fire(this.bufnr)
       this.creating = false
@@ -356,7 +389,7 @@ export default class ListUI {
       let height = Math.max(1, Math.min(this.items.length, maxHeight))
       if (height != this.height) {
         this.height = height
-        window.notify(`nvim_win_set_height`, [window, height])
+        window.notify(`nvim_win_set_height`, [height])
         this._onDidChangeHeight.fire()
       }
     }
@@ -374,8 +407,12 @@ export default class ListUI {
       buf.setLines(lines, { start: append ? -1 : 0, end: -1, strictIndexing: false }, true)
     }
     nvim.command('setl nomodifiable', true)
-    this.doHighlight()
-    if (!append) window.notify('nvim_win_set_cursor', [window, [index + 1, 0]])
+    if (!append && index == 0) {
+      this.doHighlight(0, 500)
+    } else {
+      this.doHighlight(Math.max(0, index - this.height), Math.min(index + this.height + 1, this.length - 1))
+    }
+    if (!append) window.notify('nvim_win_set_cursor', [[index + 1, 0]])
     this._onDidChange.fire()
     nvim.resumeNotification(false, true).catch(_e => {
       // noop
@@ -387,7 +424,7 @@ export default class ListUI {
     if (window && height) {
       let curr = await window.height
       if (curr != height) {
-        window.notify(`nvim_win_set_height`, [window, height])
+        window.notify(`nvim_win_set_height`, [height])
         this._onDidChangeHeight.fire()
       }
     }
@@ -410,23 +447,23 @@ export default class ListUI {
     return res
   }
 
-  private doHighlight(): void {
+  private doHighlight(start: number, end: number): void {
     let { nvim } = workspace
     let { highlights, items } = this
-    for (let i = 0; i < items.length; i++) {
+    for (let i = start; i <= Math.min(end, items.length - 1); i++) {
       let { ansiHighlights } = items[i]
       let highlight = highlights[i]
       if (ansiHighlights) {
         for (let hi of ansiHighlights) {
           let { span, hlGroup } = hi
           this.setHighlightGroup(hlGroup)
-          nvim.call('matchaddpos', [hlGroup, [[i + 1, span[0] + 1, span[1] - span[0]]], 99], true)
+          nvim.call('matchaddpos', [hlGroup, [[i + 1, span[0] + 1, span[1] - span[0]]], 9], true)
         }
       }
       if (highlight) {
         let { spans, hlGroup } = highlight
         for (let span of spans) {
-          nvim.call('matchaddpos', [hlGroup || 'Search', [[i + 1, span[0] + 1, span[1] - span[0]]], 99], true)
+          nvim.call('matchaddpos', [hlGroup || 'Search', [[i + 1, span[0] + 1, span[1] - span[0]]], 11], true)
         }
       }
     }
@@ -445,7 +482,7 @@ export default class ListUI {
     let { window, bufnr, items } = this
     let max = items.length == 0 ? 1 : items.length
     if (!bufnr || !window || lnum > max) return
-    window.notify('nvim_win_set_cursor', [window, [lnum, col]])
+    window.notify('nvim_win_set_cursor', [[lnum, col]])
     if (this.currIndex + 1 != lnum) {
       this.currIndex = lnum - 1
       this._onDidChangeLine.fire(lnum)

@@ -96,7 +96,7 @@ describe('diagnostic manager', () => {
       end: -1,
       strictIndexing: false
     })
-    await helper.wait(100)
+    await helper.wait(300)
     diagnostics.push(createDiagnostic('a', Range.create(0, 0, 0, 1)))
     diagnostics.push(createDiagnostic('b', Range.create(0, 2, 0, 3)))
     diagnostics.push(createDiagnostic('c', Range.create(1, 0, 1, 2)))
@@ -186,5 +186,15 @@ describe('diagnostic manager', () => {
 
   it('should get severity name', () => {
     expect(getNameFromSeverity(null as any)).toBe('CocError')
+  })
+
+  it('should filter diagnostics by level', async () => {
+    helper.updateConfiguration('diagnostic.level', 'warning')
+    let doc = await createDocument()
+    let diagnostics = manager.getDiagnostics(doc.uri)
+    for (let diagnostic of diagnostics) {
+      expect(diagnostic.severity != DiagnosticSeverity.Hint).toBe(true)
+      expect(diagnostic.severity != DiagnosticSeverity.Information).toBe(true)
+    }
   })
 })

@@ -24,12 +24,16 @@ import WillSaveUntilHandler from './model/willSaveHandler'
 import { TextDocumentContentProvider } from './provider'
 import { Autocmd, ConfigurationChangeEvent, ConfigurationTarget, EditerState, Env, IWorkspace, KeymapOption, MapMode, MessageLevel, MsgTypes, OutputChannel, QuickfixItem, StatusBarItem, StatusItemOption, Terminal, TerminalOptions, TerminalResult, TextDocumentWillSaveEvent, WorkspaceConfiguration, LanguageServerConfig, PatternType } from './types'
 import { isFile, readFile, readFileLine, renameAsync, resolveRoot, statAsync, writeFile } from './util/fs'
-import { disposeAll, echoErr, echoMessage, echoWarning, getKeymapModifier, isRunning, mkdirp, runCommand, wait } from './util/index'
+import { disposeAll, echoErr, echoMessage, echoWarning, getKeymapModifier, isRunning, mkdirp, runCommand, wait, isDocumentEdit } from './util/index'
 import { score } from './util/match'
 import { byteIndex, byteLength } from './util/string'
 import Watchman from './watchman'
 import uuid = require('uuid/v1')
 import { distinct } from './util/array'
+
+declare var __webpack_require__: any
+declare var __non_webpack_require__: any
+const requireFunc = typeof __webpack_require__ === "function" ? __non_webpack_require__ : require
 const logger = require('./util/logger')('workspace')
 const CONFIG_FILE_NAME = 'coc-settings.json'
 let NAME_SPACE = 1080
@@ -88,7 +92,7 @@ export class Workspace implements IWorkspace {
   public readonly configurations: Configurations
 
   constructor() {
-    let json = require('../package.json')
+    let json = requireFunc('../package.json')
     this.version = json.version
     this.configurations = this.createConfigurations()
     this.willSaveUntilHandler = new WillSaveUntilHandler(this)
@@ -101,8 +105,9 @@ export class Workspace implements IWorkspace {
   }
 
   public async init(): Promise<void> {
-    this.statusLine = new StatusLine(this.nvim)
-    this._env = await this.nvim.call('coc#util#vim_info') as Env
+    let { nvim } = this
+    this.statusLine = new StatusLine(nvim)
+    this._env = await nvim.call('coc#util#vim_info') as Env
     this._insertMode = this._env.mode.startsWith('insert')
     if (this._env.workspaceFolders) {
       this._workspaceFolders = this._env.workspaceFolders.map(f => {
@@ -167,6 +172,20 @@ export class Workspace implements IWorkspace {
         await this.detach()
       }
     }, this.disposables)
+    let provider: TextDocumentContentProvider = {
+      onDidChange: null,
+      provideTextDocumentContent: async (uri: Uri) => {
+        let channel = this.outputChannels.get(uri.path.slice(1))
+        if (!channel) return ''
+        nvim.pauseNotification()
+        nvim.command('setlocal nospell nofoldenable wrap noswapfile', true)
+        nvim.command('setlocal buftype=nofile bufhidden=hide', true)
+        nvim.command('setfiletype log', true)
+        await nvim.resumeNotification()
+        return channel.content
+      }
+    }
+    this.disposables.push(this.registerTextDocumentContentProvider('output', provider))
   }
 
   public getConfigFile(target: ConfigurationTarget): string {
@@ -443,21 +462,12 @@ export class Workspace implements IWorkspace {
       if (!this.validteDocumentChanges(documentChanges)) return false
     }
     let curpos = await nvim.call('getcurpos')
-    // let origIgnore = await nvim.getOption('eventignore') as string
-    // await nvim.setOption('eventignore', 'Syntax')
     try {
-      if (changes) {
-        for (let uri of Object.keys(changes)) {
-          let document = await this.loadFile(uri)
-          await document.applyEdits(nvim, changes[uri])
-        }
-        this.showMessage(`${Object.keys(changes).length} buffers changed.`)
-      }
       if (documentChanges && documentChanges.length) {
         let n = documentChanges.length
         for (let change of documentChanges) {
-          if (TextDocumentEdit.is(change)) {
-            let { textDocument, edits } = change
+          if (isDocumentEdit(change)) {
+            let { textDocument, edits } = change as TextDocumentEdit
             let doc = await this.loadFile(textDocument.uri)
             await doc.applyEdits(nvim, edits)
           } else if (CreateFile.is(change)) {
@@ -470,6 +480,12 @@ export class Workspace implements IWorkspace {
           }
         }
         this.showMessage(`${n} buffers changed.`)
+      } else if (changes) {
+        for (let uri of Object.keys(changes)) {
+          let document = await this.loadFile(uri)
+          await document.applyEdits(nvim, changes[uri])
+        }
+        this.showMessage(`${Object.keys(changes).length} buffers changed.`)
       }
       await nvim.call('setpos', ['.', curpos])
     } catch (e) {
@@ -724,7 +740,12 @@ export class Workspace implements IWorkspace {
       await nvim[method]('coc#util#execute', [`buffer ${moveCmd} ${bufnr}`])
     } else {
       let cwd = await nvim.call('getcwd')
-      let file = bufname.startsWith(cwd) ? path.relative(cwd, bufname) : bufname
+      let file: string
+      if (bufnr == -1) {
+        file = bufname.startsWith(cwd) ? path.relative(cwd, bufname) : bufname
+      } else {
+        file = await nvim.call('bufname', [bufnr])
+      }
       file = await nvim.call('fnameescape', file)
       let moveCmd = position ? `+call\\ cursor(${line + 1},${col})` : ''
       await nvim[method]('coc#util#execute', [`${jumpCommand} ${moveCmd} ${file}`])
@@ -950,7 +971,7 @@ export class Workspace implements IWorkspace {
    */
   public async showPrompt(title: string): Promise<boolean> {
     this._blocking = true
-    let res = await this.nvim.call('coc#util#prompt_confirm', title)
+    let res = await this.nvim.callAsync('coc#util#with_callback', ['coc#util#prompt_confirm', [title]])
     this._blocking = false
     return res == 1
   }
@@ -1131,7 +1152,6 @@ augroup end`
       end: -1,
       strictIndexing: false
     })
-    buf.setOption('readonly', true, true)
     setTimeout(async () => {
       await events.fire('BufCreate', [buf.id])
     }, 30)
@@ -1157,8 +1177,8 @@ augroup end`
   private validteDocumentChanges(documentChanges: any[] | null): boolean {
     if (!documentChanges) return true
     for (let change of documentChanges) {
-      if (TextDocumentEdit.is(change)) {
-        let { textDocument } = change
+      if (isDocumentEdit(change)) {
+        let { textDocument } = change as TextDocumentEdit
         let { uri, version } = textDocument
         let doc = this.getDocument(uri)
         if (version && !doc) {
@@ -1203,7 +1223,7 @@ augroup end`
   // events for sync buffer of vim
   private initVimEvents(): void {
     if (!this.isVim) return
-    const onChange = async bufnr => {
+    const onChange = async (bufnr: number) => {
       let doc = this.getDocument(bufnr)
       if (doc) doc.fetchContent()
     }
@@ -1215,29 +1235,21 @@ augroup end`
     let buffer = typeof buf === 'number' ? this.nvim.createBuffer(buf) : buf
     let bufnr = buffer.id
     if (this.creatingSources.has(bufnr)) return
-    let source = new CancellationTokenSource()
-    let token = source.token
-    this.creatingSources.set(bufnr, source)
     let document = this.getDocument(bufnr)
-    let disposable: Disposable
     try {
       if (document) this.onBufUnload(bufnr, true)
-      let configuration = this.configurations.getConfiguration('coc.preferences')
-      document = new Document(buffer, configuration, this._env)
-      disposable = token.onCancellationRequested(() => {
-        // can create new document of bufnr
-        this.creatingSources.delete(bufnr)
-        document.detach()
-      })
-      let created = await document.init(this.nvim)
+      document = new Document(buffer, this._env)
+      let source = new CancellationTokenSource()
+      let token = source.token
+      this.creatingSources.set(bufnr, source)
+      let created = await document.init(this.nvim, token)
       if (!created) document = null
+      if (this.creatingSources.get(bufnr) == source) {
+        source.dispose()
+        this.creatingSources.delete(bufnr)
+      }
     } catch (e) {
       logger.error('Error on create buffer:', e)
-    }
-    if (token.isCancellationRequested) document = null
-    if (disposable) disposable.dispose()
-    if (this.creatingSources.get(bufnr) == source) {
-      this.creatingSources.delete(bufnr)
     }
     if (!document) return
     this.buffers.set(bufnr, document)
@@ -1293,7 +1305,10 @@ augroup end`
   private onBufUnload(bufnr: number, recreate = false): void {
     if (!recreate) {
       let source = this.creatingSources.get(bufnr)
-      if (source) source.cancel()
+      if (source) {
+        source.cancel()
+        this.creatingSources.delete(bufnr)
+      }
     }
     if (this.terminals.has(bufnr)) {
       let terminal = this.terminals.get(bufnr)
@@ -1337,7 +1352,7 @@ augroup end`
     this._onDidOpenDocument.fire(doc.textDocument)
   }
 
-  private async checkBuffer(bufnr): Promise<void> {
+  private async checkBuffer(bufnr: number): Promise<void> {
     if (this._disposed) return
     let doc = this.getDocument(bufnr)
     if (!doc && !this.creatingSources.has(bufnr)) await this.onBufCreate(bufnr)
@@ -1371,6 +1386,44 @@ augroup end`
     return preferences.get<string[]>('rootPatterns', ['.vim', '.git', '.hg', '.projections.json']).slice()
   }
 
+  public async renameCurrent(): Promise<void> {
+    let { nvim } = this
+    let bufnr = await nvim.call('bufnr', '%')
+    let cwd = await nvim.call('getcwd')
+    let doc = this.getDocument(bufnr)
+    if (!doc || doc.buftype != '' || doc.schema != 'file') {
+      nvim.errWriteLine('current buffer is not file.')
+      return
+    }
+    let oldPath = Uri.parse(doc.uri).fsPath
+    let newPath = await nvim.call('input', ['new path:', oldPath, 'file'])
+    newPath = newPath ? newPath.trim() : null
+    if (newPath == oldPath || !newPath) return
+    let lines = await doc.buffer.lines
+    let exists = fs.existsSync(oldPath)
+    if (exists) {
+      let modified = await nvim.eval('&modified')
+      if (modified) await nvim.command('noa w')
+      if (oldPath.toLowerCase() != newPath.toLowerCase() && fs.existsSync(newPath)) {
+        let overwrite = await this.showPrompt(`${newPath} exists, overwrite?`)
+        if (!overwrite) return
+        fs.unlinkSync(newPath)
+      }
+      fs.renameSync(oldPath, newPath)
+    }
+    let filepath = newPath.startsWith(cwd) ? path.relative(cwd, newPath) : newPath
+    let cursor = await nvim.call('getcurpos')
+    nvim.pauseNotification()
+    nvim.command(`keepalt ${bufnr}bwipeout!`, true)
+    nvim.call('coc#util#open_file', ['keepalt edit', filepath], true)
+    if (!exists && lines.join('\n') != '\n') {
+      nvim.call('append', [0, lines], true)
+      nvim.command('normal! Gdd', true)
+    }
+    nvim.call('setpos', ['.', cursor], true)
+    await nvim.resumeNotification()
+  }
+
   private setMessageLevel(): void {
     let config = this.getConfiguration('coc.preferences')
     let level = config.get<string>('messageLevel', 'more')
@@ -1390,13 +1443,13 @@ augroup end`
     let res: any[] = []
     let documentEdits: TextDocumentEdit[] = []
     for (let change of changes) {
-      if (TextDocumentEdit.is(change)) {
-        let { edits, textDocument } = change
+      if (isDocumentEdit(change)) {
+        let { edits, textDocument } = change as TextDocumentEdit
         let documentEdit = documentEdits.find(o => o.textDocument.uri == textDocument.uri && o.textDocument.version === textDocument.version)
         if (documentEdit) {
           documentEdit.edits.push(...edits)
         } else {
-          documentEdits.push(change)
+          documentEdits.push(change as TextDocumentEdit)
         }
       } else {
         res.push(change)
@@ -1453,7 +1506,12 @@ augroup end`
   }
 
   private getDocumentOption(name: string, doc?: Document): Promise<any> {
-    return doc ? doc.buffer.getOption(name) : this.nvim.getOption(name)
+    if (doc) {
+      return doc.buffer.getOption(name).catch(_e => {
+        return this.nvim.getOption(name)
+      })
+    }
+    return this.nvim.getOption(name)
   }
 
   private checkProcess(): void {

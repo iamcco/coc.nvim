@@ -4,6 +4,7 @@ let s:saved_ve = &t_ve
 
 function! coc#list#get_chars()
   return {
+        \ '<plug>': "\<Plug>",
         \ '<esc>': "\<Esc>",
         \ '<tab>': "\<Tab>",
         \ '<s-tab>': "\<S-Tab>",
@@ -150,12 +151,13 @@ function! coc#list#status(name)
 endfunction
 
 function! coc#list#setup(source)
-  setl buftype=nofile filetype=list nobuflisted nofen nowrap
+  setl buftype=nofile nobuflisted nofen nowrap
   setl number norelativenumber bufhidden=wipe cursorline winfixheight
   setl tabstop=1 nolist nocursorcolumn
   setl signcolumn=yes
+  setl filetype=list
   syntax case ignore
-  let source = a:source[7:]
+  let source = a:source[8:]
   let name = toupper(source[0]).source[1:]
   execute 'syntax match Coc'.name.'Line /\v^.*$/'
 endfunction

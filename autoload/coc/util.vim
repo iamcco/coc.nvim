@@ -175,16 +175,6 @@ function! coc#util#remote_fns(name)
   return res
 endfunction
 
-function! coc#util#binary()
-  let platform = coc#util#platform()
-  if platform ==# 'windows'
-    return s:root.'/build/coc-win.exe'
-  elseif platform ==# 'mac'
-    return s:root.'/build/coc-macos'
-  endif
-  return s:root.'/build/coc-linux'
-endfunction
-
 function! coc#util#job_command()
   let node = get(g:, 'coc_node_path', 'node')
   if !executable(node)
@@ -192,7 +182,6 @@ function! coc#util#job_command()
     return
   endif
   let file = s:root.'/build/index.js'
-  "let binary = coc#util#binary()
   if filereadable(file) && !get(g:, 'coc_force_debug', 0)
     return [node] + get(g:, 'coc_node_args', ['--no-warnings']) + [s:root.'/build/index.js']
   endif
@@ -208,12 +197,16 @@ function! coc#util#echo_hover(msg)
   echohl MoreMsg
   echo a:msg
   echohl None
+  let g:coc_last_hover_message = a:msg
 endfunction
 
 function! coc#util#execute(cmd)
   exe a:cmd
   if &l:filetype ==# ''
     filetype detect
+  endif
+  if s:is_vim
+    redraw!
   endif
 endfunction
 
@@ -323,16 +316,25 @@ function! coc#util#get_input()
   return pos[2] == 1 ? '' : line[l:start : pos[2] - 2]
 endfunction
 
+function! coc#util#move_cursor(delta)
+  let pos = getcurpos()
+  call cursor(pos[1], pos[2] + a:delta)
+endfunction
+
 function! coc#util#get_complete_option()
   let disabled = get(b:, 'coc_suggest_disable', 0)
   if disabled | return | endif
   let blacklist = get(b:, 'coc_suggest_blacklist', [])
   let pos = getcurpos()
-  let line = getline(pos[1])
   let l:start = pos[2] - 1
-  while l:start > 0 && line[l:start - 1] =~# '\k'
-    let l:start -= 1
-  endwhile
+  let line = getline(pos[1])
+  for char in reverse(split(line[0: l:start - 1], '\zs'))
+    if l:start > 0 && char =~# '\k'
+      let l:start = l:start - strlen(char)
+    else
+      break
+    endif
+  endfor
   let input = pos[2] == 1 ? '' : line[l:start : pos[2] - 2]
   if !empty(blacklist) && index(blacklist, input) >= 0
     return
@@ -352,8 +354,25 @@ function! coc#util#get_complete_option()
         \}
 endfunction
 
+function! coc#util#with_callback(method, args, cb)
+  function! s:Cb() closure
+    try
+      let res = call(a:method, a:args)
+      call a:cb(v:null, res)
+    catch /.*/
+      call a:cb(v:exception)
+    endtry
+  endfunction
+  let timeout = s:is_vim ? 500 : 0
+  call timer_start(timeout, {-> s:Cb() })
+endfunction
+
+function! coc#util#add_matchids(ids)
+  let w:coc_matchids = get(w:, 'coc_matchids', []) + a:ids
+endfunction
+
 function! coc#util#prompt_confirm(title)
-  if exists('*confirm')
+  if exists('*confirm') && !s:is_vim
     let choice = confirm(a:title, "&Yes\n&No")
     return choice == 1
   else
@@ -470,7 +489,7 @@ function! coc#util#run_terminal(opts, cb)
   endif
   let opts = {
         \ 'cmd': cmd,
-        \ 'cwd': get(a:opts, 'cwd', ''),
+        \ 'cwd': get(a:opts, 'cwd', getcwd()),
         \ 'keepfocus': get(a:opts, 'keepfocus', 0),
         \ 'Callback': {status, bufnr, content -> a:cb(v:null, {'success': status == 0 ? v:true : v:false, 'bufnr': bufnr, 'content': content})}
         \}
@@ -564,6 +583,10 @@ function! coc#util#clearmatches(ids)
       " matches have been cleared in other ways,
     endtry
   endfor
+  let exists = get(w:, 'coc_matchids', [])
+  if !empty(exists)
+    call filter(w:coc_matchids, 'index(a:ids, v:val) == -1')
+  endif
 endfunction
 
 function! coc#util#open_url(url)
@@ -589,16 +612,7 @@ function! coc#util#install(...) abort
   let cmd = (s:is_win ? 'install.cmd' : './install.sh') . (tag ? '' : ' nightly')
   function! s:OnInstalled(status, ...) closure
     if a:status != 0 | return | endif
-    if s:is_vim
-      call coc#rpc#init_vim_rpc()
-    else
-      call coc#rpc#restart()
-    endif
-    let dir = coc#util#extension_root()
-    if !isdirectory(dir) && empty(get(g:, 'coc_global_extensions', []))
-      echohl WarningMsg | echom 'No extensions found' | echohl None
-      call coc#util#open_url('https://github.com/neoclide/coc.nvim/wiki/Using-coc-extensions')
-    endif
+    call coc#rpc#restart()
   endfunction
   " install.cmd would always exited with code 0 with/without errors.
   if l:terminal
@@ -652,7 +666,8 @@ function! coc#util#extension_root() abort
   return dir
 endfunction
 
-function! coc#util#update_extensions() abort
+function! coc#util#update_extensions(...) abort
+  let useTerminal = get(a:, 1, 0)
   let yarncmd = coc#util#yarn_cmd()
   if empty(yarncmd)
     echohl Error | echon '[coc.nvim] yarn command not found!' | echohl None
@@ -661,10 +676,19 @@ function! coc#util#update_extensions() abort
   if !isdirectory(dir)
     echohl Error | echon '[coc.nvim] extension root '.dir.' not found!' | echohl None
   endif
-  let cwd = getcwd()
-  exe 'lcd '.dir
-  exe '!'.yarncmd.' upgrade --latest --ignore-engines'
-  exe 'lcd '.cwd
+  if !useTerminal
+    let cwd = getcwd()
+    exe 'lcd '.dir
+    exe '!'.yarncmd.' upgrade --latest --ignore-engines --ignore-scripts'
+    exe 'lcd '.cwd
+  else
+    call coc#util#open_terminal({
+          \ 'cmd': yarncmd.' upgrade --latest --ignore-engines --ignore-scripts',
+          \ 'autoclose': 1,
+          \ 'cwd': dir,
+          \})
+    wincmd p
+  endif
 endfunction
 
 function! coc#util#install_extension(args) abort
@@ -696,15 +720,21 @@ function! coc#util#install_extension(args) abort
     endfunction
     call coc#util#open_terminal({
           \ 'cwd': dir,
-          \ 'cmd': yarncmd.' add '.names.' --ignore-engines',
+          \ 'cmd': yarncmd.' add '.names.' --ignore-engines --ignore-scripts',
           \ 'keepfocus': 1,
           \ 'Callback': funcref('s:OnExtensionInstalled'),
           \})
   else
-    let cwd = getcwd()
-    exe 'lcd '.dir
-    exe '!'.yarncmd.' add '.names.' --ignore-engines'
-    exe 'lcd '.cwd
+    if $NODE_ENV ==# 'test'
+      for name in split(names, ' ')
+        call mkdir(dir . '/node_modules/'.name, 'p', 0700)
+      endfor
+    else
+      let cwd = getcwd()
+      exe 'lcd '.dir
+      exe '!'.yarncmd.' add '.names . ' --ignore-engines --ignore-scripts'
+      exe 'lcd '.cwd
+    endif
   endif
 endfunction
 

@@ -74,8 +74,13 @@ export function resolveRoot(dir: string, subs: string[], cwd?: string): string |
 }
 
 export function inDirectory(dir: string, subs: string[]): boolean {
-  let files = fs.readdirSync(dir)
-  return files.findIndex(f => subs.indexOf(f) !== -1) !== -1
+  try {
+    let files = fs.readdirSync(dir)
+    return files.findIndex(f => subs.indexOf(f) !== -1) !== -1
+  } catch (e) {
+    // could be failed without permission
+    return false
+  }
 }
 
 export function readFile(fullpath: string, encoding: string): Promise<string> {
@@ -124,10 +129,10 @@ export function validSocket(path: string): Promise<boolean> {
   })
 }
 
-export async function readdirAsync(path: string): Promise<string[]> {
-  return await util.promisify(fs.readdir)(path)
-}
-
 export function isFile(uri: string): boolean {
   return uri.startsWith('file:')
 }
+
+export const readdirAsync = util.promisify(fs.readdir)
+
+export const realpathAsync = util.promisify(fs.realpath)

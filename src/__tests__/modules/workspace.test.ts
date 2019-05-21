@@ -384,6 +384,33 @@ describe('workspace methods', () => {
     expect(typeof pid == 'number').toBe(true)
     terminal.dispose()
   })
+
+  it('should rename buffer', async () => {
+    await nvim.command('edit a')
+    await helper.wait(100)
+    let p = workspace.renameCurrent()
+    await helper.wait(100)
+    await nvim.input('<backspace>b<cr>')
+    await p
+    let name = await nvim.eval('bufname("%")') as string
+    expect(name.endsWith('b')).toBe(true)
+  })
+
+  it('should rename file', async () => {
+    let cwd = await nvim.call('getcwd')
+    let file = path.join(cwd, 'a')
+    fs.writeFileSync(file, 'foo', 'utf8')
+    await nvim.command('edit a')
+    await helper.wait(100)
+    let p = workspace.renameCurrent()
+    await helper.wait(100)
+    await nvim.input('<backspace>b<cr>')
+    await p
+    let name = await nvim.eval('bufname("%")') as string
+    expect(name.endsWith('b')).toBe(true)
+    expect(fs.existsSync(path.join(cwd, 'b'))).toBe(true)
+    fs.unlinkSync(path.join(cwd, 'b'))
+  })
 })
 
 describe('workspace utility', () => {
@@ -548,7 +575,7 @@ describe('workspace utility', () => {
     await helper.wait(100)
     let buf = await nvim.buffer
     let name = await buf.name
-    expect(name).toMatch('[coc channel]')
+    expect(name).toMatch('channel')
   })
 
   it('should not show none exists channel', async () => {
@@ -887,25 +914,17 @@ describe('workspace events', () => {
     doc = workspace.getDocument(buf.id)
     expect(doc.bufnr).toBe(buf.id)
   })
-})
 
-describe('workspace private', () => {
-
-  it('should init vim events', async () => {
+  it('should create document with same bufnr', async () => {
+    await nvim.command('tabe')
     let buf = await helper.edit()
-    await buf.detach()
-    let attached = buf.isAttached
-    expect(attached).toBe(false)
+    await helper.wait(100)
     let doc = workspace.getDocument(buf.id)
-      ; (doc as any).env.isVim = true
-      ; (workspace as any).initVimEvents()
-    await nvim.setLine('abc')
-    await helper.wait(100)
-    expect(doc.content).toMatch('abc')
-    await nvim.input('Adef')
-    await nvim.call('coc#_hide')
-    await helper.wait(100)
-    expect(doc.getline(0)).toMatch('abcdef')
+    expect(doc).toBeDefined()
+    await nvim.setLine('foo')
+    await helper.wait(30)
+    let content = doc.getDocumentContent()
+    expect(content).toMatch('foo')
   })
 })
 
@@ -946,5 +965,24 @@ describe('workspace textDocument content provider', () => {
     let lines = await buf.lines
     expect(lines).toEqual(['bar'])
   })
+})
 
+describe('workspace private', () => {
+
+  it('should init vim events', async () => {
+    let buf = await helper.edit()
+    await buf.detach()
+    let attached = buf.isAttached
+    expect(attached).toBe(false)
+    let doc = workspace.getDocument(buf.id)
+      ; (doc as any).env.isVim = true
+      ; (workspace as any).initVimEvents()
+    await nvim.setLine('abc')
+    await helper.wait(300)
+    expect(doc.content).toMatch('abc')
+    await nvim.input('Adef')
+    await nvim.call('coc#_hide')
+    await helper.wait(300)
+    expect(doc.getline(0)).toMatch('abcdef')
+  })
 })

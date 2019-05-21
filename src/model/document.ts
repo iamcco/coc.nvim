@@ -1,13 +1,14 @@
 import { Buffer, Neovim } from '@chemzqm/neovim'
 import debounce from 'debounce'
-import { DidChangeTextDocumentParams, Emitter, Event, Position, Range, TextDocument, TextEdit } from 'vscode-languageserver-protocol'
+import { DidChangeTextDocumentParams, Emitter, Event, Position, Range, TextDocument, TextEdit, CancellationToken } from 'vscode-languageserver-protocol'
 import Uri from 'vscode-uri'
-import { BufferOption, ChangeInfo, Env, WorkspaceConfiguration } from '../types'
+import { BufferOption, ChangeInfo, Env } from '../types'
 import { diffLines, getChange } from '../util/diff'
 import { isGitIgnored } from '../util/fs'
 import { getUri, wait } from '../util/index'
 import { byteIndex, byteLength } from '../util/string'
 import { Chars } from './chars'
+import { group } from '../util/array'
 const logger = require('../util/logger')('model-document')
 
 export type LastChangeType = 'insert' | 'change' | 'delete'
@@ -39,11 +40,10 @@ export default class Document {
   public readonly onDocumentDetach: Event<string> = this._onDocumentDetach.event
   constructor(
     public readonly buffer: Buffer,
-    private configurations: WorkspaceConfiguration,
     private env: Env) {
     this.fireContentChanges = debounce(() => {
       this._fireContentChanges()
-    }, 50)
+    }, 200)
     this.fetchContent = debounce(() => {
       this._fetchContent().catch(e => {
         logger.error(`Error on fetch content:`, e)
@@ -57,12 +57,6 @@ export default class Document {
 
   public get words(): string[] {
     return this._words
-  }
-
-  private generateWords(): void {
-    let limit = this.configurations.get<number>('limitLines', 30000)
-    let lines = this.lines.slice(0, limit)
-    this._words = this.chars.matchKeywords(lines.join('\n'))
   }
 
   public setFiletype(filetype: string): void {
@@ -101,7 +95,7 @@ export default class Document {
     return this.lines.length
   }
 
-  public async init(nvim: Neovim): Promise<boolean> {
+  public async init(nvim: Neovim, token: CancellationToken): Promise<boolean> {
     this.nvim = nvim
     let { buffer } = this
     let opts: BufferOption = await nvim.call('coc#util#get_bufoptions', buffer.id)
@@ -111,34 +105,52 @@ export default class Document {
     this._rootPatterns = opts.rootPatterns
     this.eol = opts.eol == 1
     let uri = this._uri = getUri(opts.fullpath, buffer.id, buftype)
-    if (this.shouldAttach(buftype)) {
+    token.onCancellationRequested(() => {
+      this.detach()
+    })
+    try {
       if (!this.env.isVim) {
         let res = await this.attach()
         if (!res) return false
       } else {
-        this.lines = (await buffer.lines) as string[]
+        this.lines = await buffer.lines
       }
       this.attached = true
+    } catch (e) {
+      logger.error('attach error:', e)
+      return false
     }
     this._filetype = this.convertFiletype(opts.filetype)
     this.textDocument = TextDocument.create(uri, this.filetype, 1, this.getDocumentContent())
     this.setIskeyword(opts.iskeyword)
     this.gitCheck()
+    if (token.isCancellationRequested) return false
     return true
   }
 
   public setIskeyword(iskeyword: string): void {
     let chars = (this.chars = new Chars(iskeyword))
-    let config = this.configurations
-    let hyphenAsKeyword = config.get<boolean>('hyphenAsKeyword', true)
-    if (hyphenAsKeyword) chars.addKeyword('-')
-    this.generateWords()
+    this.buffer.getVar('coc_additional_keywords').then((keywords: string[]) => {
+      if (keywords && keywords.length) {
+        for (let ch of keywords) {
+          chars.addKeyword(ch)
+        }
+        this._words = this.chars.matchKeywords(this.lines.join('\n'))
+      }
+    }, _e => {
+      // noop
+    })
   }
 
   public async attach(): Promise<boolean> {
-    let attached = await this.buffer.attach(false)
-    if (!attached) return false
-    this.lines = (await this.buffer.lines) as string[]
+    if (this.shouldAttach(this.buftype)) {
+      let attached = await this.buffer.attach(false)
+      if (!attached) return false
+      this.lines = await this.buffer.lines
+    } else {
+      this.lines = await this.buffer.lines
+      return true
+    }
     if (!this.buffer.isAttached) return
     this.buffer.listen('lines', (...args) => {
       this.onChange.apply(this, args)
@@ -210,11 +222,12 @@ export default class Document {
         rangeLength: change.end - change.start,
         text: change.newText
       }]
+      logger.debug('changes:', JSON.stringify(changes, null, 2))
       this._onDocumentChange.fire({
         textDocument: { version, uri },
         contentChanges: changes
       })
-      this.generateWords()
+      this._words = this.chars.matchKeywords(this.lines.join('\n'))
     } catch (e) {
       logger.error(e.message)
     }
@@ -255,18 +268,11 @@ export default class Document {
     return this.textDocument ? this.textDocument.version : null
   }
 
-  public setKeywordOption(option: string): void {
-    this.chars = new Chars(option)
-  }
-
   public async applyEdits(_nvim: Neovim, edits: TextEdit[], sync = true): Promise<void> {
     if (edits.length == 0) return
-    let orig = this.lines.join('\n')
-    let textDocument = TextDocument.create(this.uri, this.filetype, 1, orig + (this.eol ? '\n' : ''))
+    let orig = this.lines.join('\n') + (this.eol ? '\n' : '')
+    let textDocument = TextDocument.create(this.uri, this.filetype, 1, orig)
     let content = TextDocument.applyEdits(textDocument, edits)
-    if (this.eol && content.endsWith('\n')) {
-      content = content.slice(0, -1)
-    }
     // could be equal sometimes
     if (orig === content) {
       this.createDocument()
@@ -278,7 +284,7 @@ export default class Document {
         strictIndexing: false
       })
       // can't wait vim sync buffer
-      this.lines = content.split('\n')
+      this.lines = (this.eol && content.endsWith('\n') ? content.slice(0, -1) : content).split('\n')
       if (sync) this.forceSync()
     }
   }
@@ -360,7 +366,7 @@ export default class Document {
 
   private gitCheck(): void {
     let { uri } = this
-    if (!uri.startsWith('file')) return
+    if (!uri.startsWith('file') || this.buftype != '') return
     let filepath = Uri.parse(uri).fsPath
     isGitIgnored(filepath).then(isIgnored => {
       this.isIgnored = isIgnored
@@ -451,47 +457,50 @@ export default class Document {
     return col
   }
 
+  public matchAddRanges(ranges: Range[], hlGroup: string, priority = 10): number[] {
+    let res: number[] = []
+    let method = this.env.isVim ? 'callTimer' : 'call'
+    let arr: number[][] = []
+    let splited: Range[] = ranges.reduce((p, c) => {
+      for (let i = c.start.line; i <= c.end.line; i++) {
+        let curr = this.getline(i) || ''
+        let sc = i == c.start.line ? c.start.character : 0
+        let ec = i == c.end.line ? c.end.character : curr.length
+        if (sc == ec) continue
+        p.push(Range.create(i, sc, i, ec))
+      }
+      return p
+    }, [])
+    for (let range of splited) {
+      let { start, end } = range
+      if (start.character == end.character) continue
+      let line = this.getline(start.line)
+      arr.push([start.line + 1, byteIndex(line, start.character) + 1, byteLength(line.slice(start.character, end.character))])
+    }
+    for (let grouped of group(arr, 8)) {
+      let id = this.colorId
+      this.colorId = this.colorId + 1
+      this.nvim[method]('matchaddpos', [hlGroup, grouped, priority, id], true)
+      res.push(id)
+    }
+    return res
+  }
+
   public highlightRanges(ranges: Range[], hlGroup: string, srcId: number): number[] {
-    let { nvim } = this
     let res: number[] = []
     if (this.env.isVim) {
-      let group: Range[] = []
-      for (let i = 0, l = ranges.length; i < l; i++) {
-        if (group.length < 8) {
-          group.push(ranges[i])
-        } else {
-          group = []
-          group.push(ranges[i])
-        }
-        if (group.length == 8 || i == l - 1) {
-          let arr: number[][] = []
-          for (let range of group) {
-            let { start, end } = range
-            let line = this.getline(start.line)
-            if (end.line - start.line == 1 && end.character == 0) {
-              arr.push([start.line + 1])
-            } else {
-              arr.push([start.line + 1, byteIndex(line, start.character) + 1, byteLength(line.slice(start.character, end.character))])
-            }
-          }
-          let id = this.colorId
-          this.colorId = this.colorId + 1
-          nvim.callTimer('matchaddpos', [hlGroup, arr, 9, id], true)
-          res.push(id)
-        }
-      }
+      res = this.matchAddRanges(ranges, hlGroup, 10)
     } else {
       for (let range of ranges) {
         let { start, end } = range
         let line = this.getline(start.line)
+        // tslint:disable-next-line: no-floating-promises
         this.buffer.addHighlight({
           hlGroup,
           srcId,
           line: start.line,
           colStart: byteIndex(line, start.character),
           colEnd: end.line - start.line == 1 && end.character == 0 ? -1 : byteIndex(line, end.character)
-        }).catch(_e => {
-          // noop
         })
         res.push(srcId)
       }

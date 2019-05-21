@@ -1,8 +1,7 @@
 import { Neovim } from '@chemzqm/neovim'
-import { CancellationTokenSource, Position } from 'vscode-languageserver-protocol'
+import { CancellationTokenSource, Emitter, Event, Position } from 'vscode-languageserver-protocol'
 import Document from '../model/document'
 import { CompleteConfig, CompleteOption, CompleteResult, ISource, RecentScore, VimCompleteItem } from '../types'
-import { echoErr, echoWarning } from '../util'
 import { fuzzyMatch, getCharCodes } from '../util/fuzzy'
 import { byteSlice, characterIndex } from '../util/string'
 import { matchScore } from './match'
@@ -10,18 +9,24 @@ const logger = require('../util/logger')('completion-complete')
 
 export type Callback = () => void
 
+// first time completion
+const FIRST_TIMEOUT = 500
+
 export default class Complete {
   // identify this complete
-  public results: CompleteResult[] | null
+  public results: CompleteResult[] = []
   public readonly recentScores: RecentScore
+  private completing: Set<string> = new Set()
   private _canceled = false
-  private sources: ISource[]
   private localBonus: Map<string, number>
-  private tokenSources: Set<CancellationTokenSource> = new Set()
+  private tokenSources: Map<string, CancellationTokenSource> = new Map()
+  private readonly _onDidComplete = new Emitter<void>()
+  public readonly onDidComplete: Event<void> = this._onDidComplete.event
   constructor(public option: CompleteOption,
     private document: Document,
     recentScores: RecentScore | null,
     private config: CompleteConfig,
+    private sources: ISource[],
     private nvim: Neovim) {
     Object.defineProperty(this, 'recentScores', {
       get: (): RecentScore => {
@@ -30,8 +35,16 @@ export default class Complete {
     })
   }
 
+  public get isCompleting(): boolean {
+    return this.completing.size > 0
+  }
+
   public get isCanceled(): boolean {
     return this._canceled
+  }
+
+  public get isEmpty(): boolean {
+    return this.results.length == 0
   }
 
   public get startcol(): number {
@@ -43,67 +56,92 @@ export default class Complete {
   }
 
   public get isIncomplete(): boolean {
-    return this.results && this.results.findIndex(o => o.isIncomplete == true) !== -1
+    return this.results.findIndex(o => o.isIncomplete == true) !== -1
   }
 
-  private async completeSource(source: ISource, completeInComplete = false): Promise<CompleteResult | null> {
+  private async completeSource(source: ISource, completeInComplete = false): Promise<void> {
     let { col } = this.option
     // new option for each source
     let opt = Object.assign({}, this.option)
     let timeout = this.config.timeout
-    timeout = Math.min(timeout, 5000)
+    timeout = Math.max(Math.min(timeout, 5000), 1000)
     try {
       if (typeof source.shouldComplete === 'function') {
         let shouldRun = await Promise.resolve(source.shouldComplete(opt))
         if (!shouldRun) return null
       }
       let start = Date.now()
+      let oldSource = this.tokenSources.get(source.name)
+      if (oldSource) oldSource.cancel()
       let tokenSource = new CancellationTokenSource()
-      this.tokenSources.add(tokenSource)
-      let result = await new Promise<CompleteResult>((resolve, reject) => {
+      this.tokenSources.set(source.name, tokenSource)
+      await new Promise<CompleteResult>((resolve, reject) => {
+        let { name } = source
         let timer = setTimeout(() => {
-          disposable.dispose()
+          this.nvim.command(`echohl WarningMsg| echom 'source ${source.name} timeout after ${timeout}ms'|echohl None`, true)
           tokenSource.cancel()
-          echoWarning(this.nvim, `source ${source.name} timeout after ${timeout}ms`)
-          resolve(null)
         }, timeout)
+        let cancelled = false
         let called = false
+        let empty = false
+        let ft = setTimeout(() => {
+          if (called) return
+          empty = true
+          resolve()
+        }, FIRST_TIMEOUT)
         let onFinished = () => {
           if (called) return
           called = true
           disposable.dispose()
+          clearTimeout(ft)
           clearTimeout(timer)
-          this.tokenSources.delete(tokenSource)
+          this.tokenSources.delete(name)
         }
         let disposable = tokenSource.token.onCancellationRequested(() => {
+          disposable.dispose()
+          this.completing.delete(name)
+          cancelled = true
           onFinished()
-          reject(new Error('Cancelled request'))
+          logger.debug(`Source "${name}" cancelled`)
+          resolve()
         })
+        this.completing.add(name)
         Promise.resolve(source.doComplete(opt, tokenSource.token)).then(result => {
+          this.completing.delete(name)
+          if (cancelled) return
           onFinished()
-          resolve(result)
+          let dt = Date.now() - start
+          logger.debug(`Source "${name}" takes ${dt}ms`)
+          if (result && result.items && result.items.length) {
+            if (result.startcol != null && result.startcol != col) {
+              result.engross = true
+            }
+            result.priority = source.priority
+            result.source = name
+            result.completeInComplete = completeInComplete
+            // lazy completed items
+            if (result.engross && empty) {
+              this.results = [result]
+            } else {
+              let { results } = this
+              let idx = results.findIndex(o => o.source == name)
+              if (idx != -1) results.splice(idx, 1)
+              this.results.push(result)
+            }
+            if (empty) this._onDidComplete.fire()
+            resolve()
+          } else {
+            resolve()
+          }
         }, err => {
+          this.completing.delete(name)
           onFinished()
           reject(err)
         })
       })
-      let dt = Date.now() - start
-      logger[dt > 1000 ? 'warn' : 'debug'](`Complete source "${source.name}" takes ${dt}ms`)
-      if (result == null || result.items.length == 0) {
-        return null
-      }
-      if (result.startcol != null && result.startcol != col) {
-        result.engross = true
-      }
-      result.priority = source.priority
-      result.source = source.name
-      result.completeInComplete = completeInComplete
-      return result
     } catch (err) {
-      if (err.message && err.message.indexOf('Cancelled') != -1) return null
-      echoErr(this.nvim, `${source.name} complete error: ${err}`)
+      this.nvim.command(`echoerr 'Complete ${source.name} error: ${err.message.replace(/'/g, "''")}'`, true)
       logger.error('Complete error:', source.name, err)
-      return null
     }
   }
 
@@ -124,15 +162,21 @@ export default class Complete {
       triggerForInComplete: true
     })
     let sources = this.sources.filter(s => names.indexOf(s.name) !== -1)
-    results = await Promise.all(sources.map(s => this.completeSource(s, true)))
-    results = results.concat(remains)
-    results = results.filter(r => r != null && r.items && r.items.length > 0)
-    this.results = results
+    await Promise.all(sources.map(s => this.completeSource(s, true)))
     return this.filterResults(resumeInput, Math.floor(Date.now() / 1000))
+  }
+
+  public excludeResults(names: string[]): CompleteResult[] {
+    let { results } = this
+    if (!results) return []
+    let arr = this.results.filter(o => names.indexOf(o.source) == -1)
+    arr.forEach(o => o.engross = false)
+    return arr
   }
 
   public filterResults(input: string, cid = 0): VimCompleteItem[] {
     let { results } = this
+    results.sort((a, b) => b.priority - a.priority)
     let now = Date.now()
     let { bufnr } = this.option
     let { snippetIndicator, fixInsertedWord } = this.config
@@ -162,7 +206,9 @@ export default class Complete {
         if (maxScore > 5 && priority <= 10 && score < maxScore) continue
         if (followPart.length && !item.isSnippet) {
           if (item.word.endsWith(followPart)) {
+            let { word } = item
             item.word = item.word.slice(0, - followPart.length)
+            item.abbr = item.abbr || word
           }
         }
         if (!item.user_data) {
@@ -251,19 +297,20 @@ export default class Complete {
     return false
   }
 
-  public async doComplete(sources: ISource[]): Promise<VimCompleteItem[]> {
+  public async doComplete(preserved?: CompleteResult[]): Promise<VimCompleteItem[]> {
     let opts = this.option
-    let { line, colnr, linenr } = opts
-    sources.sort((a, b) => b.priority - a.priority)
-    this.sources = sources
+    let { line, colnr, linenr } = this.option
     if (this.config.localityBonus) {
       let line = linenr - 1
       this.localBonus = this.document.getLocalifyBonus(Position.create(line, opts.col - 1), Position.create(line, colnr))
     } else {
       this.localBonus = new Map()
     }
-    let results = await Promise.all(sources.map(s => this.completeSource(s)))
-    results = results.filter(r => r != null && r.items && r.items.length > 0)
+    await Promise.all(this.sources.map(s => this.completeSource(s)))
+    let { results } = this
+    if (preserved && preserved.length) {
+      results = this.results = results.concat(preserved)
+    }
     if (results.length == 0) return []
     let engrossResult = results.find(r => r.engross === true)
     if (engrossResult) {
@@ -272,10 +319,9 @@ export default class Complete {
         opts.col = startcol
         opts.input = byteSlice(line, startcol, colnr - 1)
       }
-      results = [engrossResult]
+      this.results = [engrossResult]
     }
-    this.results = results
-    logger.info(`Results from: ${results.map(s => s.source).join(',')}`)
+    logger.info(`Results from: ${this.results.map(s => s.source).join(',')}`)
     return this.filterResults(opts.input, Math.floor(Date.now() / 1000))
   }
 
@@ -299,11 +345,14 @@ export default class Complete {
     return part.match(/^\S?[\w\-]*/)[0]
   }
 
-  public cancel(): void {
+  public dispose(): void {
+    this._onDidComplete.dispose()
     this._canceled = true
-    for (let tokenSource of this.tokenSources) {
+    for (let tokenSource of this.tokenSources.values()) {
       tokenSource.cancel()
     }
     this.tokenSources.clear()
+    this.sources = []
+    this.results = []
   }
 }

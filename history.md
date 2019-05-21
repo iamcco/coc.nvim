@@ -1,3 +1,22 @@
+# 2019-05-07
+
+- **New feature** load extensions from coc-extensions folder.
+- Add `workspace.renameCurrentFile` command.
+- Add `FloatBuffer`, `FloatFactory` and `Uri` to exports.
+- Add `resolveItem` support to list.
+- Fix prompt can't work when execute list action.
+- Fix ansiparser for empty color ranges.
+- Fix highlight only work with first 8 items.
+
+# 2019-04-27
+
+- **Break change** vim-node-rpc not required on vim.
+- **Break change** python not required on vim.
+- **Break change** complete items would refreshed after 500ms when not finished.
+- Add `additionalSchemes` for configured language server.
+- Add support for jumpCommand as false.
+- Fix `diagnostic.level` not work.
+
 # 2019-04-09
 
 - **Break change** `--strictMatch` option of list renamed to `--strict`
@@ -440,7 +459,7 @@
 - **Break change** snippet support reworked: support nest snippets, independent
   session in each buffer and lots of fixes.
 - **Break change** diagnostic list now sort by severity first.
-- Add commands: `:CocUnInstall` and `:CocOpenLog`
+- Add commands: `:CocUninstall` and `:CocOpenLog`
 - Add cterm color for highlights.
 - Add line highlight support for diagnostic.
 - Add `coc.preferences.fixInsertedWord` to make complete item replace current word.

@@ -8,17 +8,15 @@ import events from './events'
 import extensions from './extensions'
 import Source from './model/source'
 import VimSource from './model/source-vim'
-import { CompleteOption, ISource, SourceStat, SourceType, VimCompleteItem } from './types'
+import { CompleteOption, ISource, SourceStat, SourceType, VimCompleteItem, SourceConfig } from './types'
 import { disposeAll } from './util'
 import { statAsync } from './util/fs'
 import workspace from './workspace'
 import { byteSlice } from './util/string'
 const logger = require('./util/logger')('sources')
 
-type Omit<T, K extends keyof T> = Pick<T, Exclude<keyof T, K>>
-
+// type Omit<T, K extends keyof T> = Pick<T, Exclude<keyof T, K>>
 // priority,triggerPatterns,shortcut,enable,filetypes,disableSyntaxes,firstMatch
-type ReadonlyProps = 'priority' | 'sourceType' | 'triggerPatterns' | 'enable' | 'filetypes' | 'disableSyntaxes' | 'firstMatch'
 
 export class Sources {
   private sourceMap: Map<string, ISource> = new Map()
@@ -182,7 +180,7 @@ export class Sources {
     let source = this.getSource(item.source)
     if (source && typeof source.onCompleteResolve == 'function') {
       try {
-        await source.onCompleteResolve(item, token)
+        await Promise.resolve(source.onCompleteResolve(item, token))
       } catch (e) {
         logger.error('Error on complete resolve:', e.stack)
       }
@@ -208,9 +206,9 @@ export class Sources {
 
   public getCompleteSources(opt: CompleteOption, isTriggered: boolean): ISource[] {
     let { filetype } = opt
-    let pre = byteSlice(opt.line, 0, opt.col)
+    let pre = byteSlice(opt.line, 0, opt.colnr - 1)
     if (isTriggered) return this.getTriggerSources(pre, filetype)
-    return this.getSourcesForFiletype(filetype)
+    return this.getSourcesForFiletype(filetype, isTriggered)
   }
 
   public shouldTrigger(pre: string, languageId: string): boolean {
@@ -228,7 +226,7 @@ export class Sources {
   }
 
   public getTriggerSources(pre: string, languageId: string): ISource[] {
-    let sources = this.getSourcesForFiletype(languageId)
+    let sources = this.getSourcesForFiletype(languageId, true)
     let character = pre[pre.length - 1]
     return sources.filter(o => {
       if (o.triggerCharacters && o.triggerCharacters.indexOf(character) !== -1) return true
@@ -237,9 +235,12 @@ export class Sources {
     })
   }
 
-  public getSourcesForFiletype(filetype: string): ISource[] {
+  public getSourcesForFiletype(filetype: string, isTriggered: boolean): ISource[] {
     return this.sources.filter(source => {
       let { filetypes } = source
+      if (source.triggerOnly && isTriggered === false) {
+        return false
+      }
       if (source.enable && (!filetypes || filetypes.indexOf(filetype) !== -1)) {
         return true
       }
@@ -311,9 +312,13 @@ export class Sources {
     }
   }
 
-  public createSource(config: Omit<ISource, ReadonlyProps>): Disposable {
-    let source = new Source({ name: config.name, sourceType: SourceType.Remote })
-    Object.assign(source, config)
+  public createSource(config: SourceConfig): Disposable {
+    if (!config.name || !config.doComplete) {
+      // tslint:disable-next-line: no-console
+      console.error(`name and doComplete required for createSource`)
+      return
+    }
+    let source = new Source(Object.assign({ sourceType: SourceType.Service } as any, config))
     return this.addSource(source)
   }
 

@@ -75,16 +75,6 @@ https://yarnpkg.com/en/docs/install
 
 如果你使用 vim-plug 来管理 coc.nvim 插件可以不需要安装 yarn。
 
-如果你是 vim 用户，需要额外安装：
-
-https://github.com/neoclide/vim-node-rpc
-
-提供 rpc 服务，执行命令: >
-
-	yarn global add vim-node-rpc
->
-即可安装。
-
 ==============================================================================
 
 安装						*coc-install*
@@ -298,8 +288,15 @@ b:coc_suggest_disable 				*b:coc_suggest_disable*
 
 			用于针对特定 buffer 禁用补全，例如: >
 			
-	" 对 python 文件禁用补全
-	autocmd FileType python let b:coc_suggest_disable = 1
+			" 对 python 文件禁用补全
+			autocmd FileType python let b:coc_suggest_disable = 1
+
+b:coc_additional_keywords			*b:coc_additional_keywords*
+
+			生成单词列表所用的额外 keyword 字符，例如： >
+			
+			" Add keyword characers for css
+			autocmd FileType css let b:coc_additional_keywords = ["-"]
 
 b:coc_suggest_blacklist 				*b:coc_suggest_blacklist*
 
@@ -420,12 +417,6 @@ g:coc_node_args 				*g:coc_node_args*
 			let g:coc_node_args = ['--nolazy', '--inspect-brk=6045']
 <
 			默认: []
-
-
-g:vim_node_rpc_folder 				*g:vim_node_rpc_folder*
-
-			包含 vim-node-rpc 模块的目录，用于加速 vim 启动时间。
-			默认从 yarn 的全局安装路径进行检测。
 
 
 g:coc_process_pid 				*g:coc_process_pid*
@@ -646,8 +637,9 @@ CocLocations({id}, {method}, [{params}, {openCommand}])
 	call CocLocations('ccls', '$ccls/call',  {}, 'vsplit')
 <
 	{openCommand}: 缓冲区打开方法，默认使用
-	`coc.preferences.jumpCommand` 打开。
-
+	`coc.preferences.jumpCommand` 打开。 设置为 `v:false` 时总是使用
+	locations 列表。
+	
 						*CocLocationsAsync()*
 CocLocationsAsync({id}, {method}, [{params}, {openCommand}])
 
@@ -696,7 +688,8 @@ CocActionAsync({action}, [...{args}, [{callback}]])
 
 	如有多个定义，使用 |coc-list| 展示。
 
-	{openCommand}: 可选打开命令，默认为 `coc.preferences.jumpCommand` 
+	{openCommand}: 可选打开命令，默认为 `coc.preferences.jumpCommand`，
+	设置为 `v:false` 时总是使用 locations 列表。
 
 "jumpDeclaration" [{openCommand}] 		*coc-action-jumpDeclaration*
 
@@ -903,14 +896,17 @@ CocActionAsync({action}, [...{args}, [{callback}]])
 
 		打开用户的 `coc-setting.json` 文件。
 
-:CocInstall {name} ... 				*:CocInstall*
+:CocInstall [{option}] {name} ... 		*:CocInstall*
 
 		安装一个或多个 coc 插件。
 
+		{option}: 可以使用 `-sync` 用同步方式而不是 terminal
+		安装插件。
+		
 		访问 https://www.npmjs.com/search?q=keywords%3Acoc.nvim
 		获取所有 coc 插件。
 
-:CocUninstall {name} 				*:CocUnInstall*
+:CocUninstall {name} 				*:CocUninstall*
 
 		卸载指定 coc 插件，支持使用 <tab> 进行补全。
 
@@ -921,7 +917,7 @@ CocActionAsync({action}, [...{args}, [{callback}]])
 		升级前请尽可能确保 coc 为最新版本，否则升级可能失败，
 		因为插件可能使用了新版 API 导致不兼容。
 
-:CocUpdateSync 					*:CocUpdatSynce*
+:CocUpdateSync 					*:CocUpdateSync*
 
 		同步方式升级所有插件。
 
@@ -1171,7 +1167,7 @@ LIST COMMAND 					*coc-list-command*
 <
 		打开当前的跳转列表。
 
-		查看 |coc-list-command-options| 获取可用的 {options}。
+		查看 |coc-command-options| 获取可用的 {options}。
 
 		{args} 为传递给对应源的参数。
 
@@ -1550,7 +1546,7 @@ vim-airline: https://github.com/vim-airline/vim-airline 支持：
 <
 改变警告标签：
 >
-	let airline#extensions#coc#error_symbol = 'Warning:'
+	let airline#extensions#coc#warning_symbol = 'Warning:'
 <
 改变错误格式：
 >

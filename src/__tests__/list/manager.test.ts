@@ -1,6 +1,6 @@
 import { Neovim } from '@chemzqm/neovim'
 import manager from '../../list/manager'
-import { QuickfixItem } from '../../types'
+import { QuickfixItem, IList } from '../../types'
 import helper from '../helper'
 
 let nvim: Neovim
@@ -26,21 +26,22 @@ beforeAll(async () => {
   await nvim.setVar('coc_jump_locations', locations)
 })
 
-afterAll(async () => {
-  await helper.shutdown()
-})
-
 afterEach(async () => {
   await manager.cancel()
   await helper.reset()
 })
 
+afterAll(async () => {
+  await helper.wait(300)
+  await helper.shutdown()
+})
+
 describe('list commands', () => {
-  it('should activated', async () => {
+  it('should be activated', async () => {
     await manager.start(['location'])
     expect(manager.isActivated).toBe(true)
     expect(manager.name).toBe('location')
-    await helper.wait(100)
+    await helper.wait(500)
     let line = await nvim.getLine()
     expect(line).toMatch(/manager.test.ts/)
   })
@@ -51,8 +52,8 @@ describe('list commands', () => {
   })
 
   it('should resume list', async () => {
-    await nvim.command('CocList --normal location')
-    await helper.wait(100)
+    await manager.start(['--normal', 'location'])
+    await helper.wait(300)
     await nvim.eval('feedkeys("j", "in")')
     await helper.wait(30)
     let line = await nvim.call('line', '.')
@@ -82,7 +83,7 @@ describe('list commands', () => {
   })
 
   it('should parse arguments', async () => {
-    await nvim.command('CocList --input=test --normal --no-sort --ignore-case --top --number-select --auto-preview --strict location')
+    await manager.start(['--input=test', '--normal', '--no-sort', '--ignore-case', '--top', '--number-select', '--auto-preview', '--strict', 'location'])
     await helper.wait(30)
     let opts = manager.listOptions
     expect(opts).toEqual({
@@ -109,7 +110,7 @@ describe('list options', () => {
 
   it('should respect regex filter', async () => {
     await manager.start(['--input=f.o', '--regex', 'location'])
-    await helper.wait(100)
+    await helper.wait(200)
     let item = await manager.ui.item
     expect(item.label).toMatch('foo')
   })
@@ -117,13 +118,14 @@ describe('list options', () => {
   it('should respect normal option', async () => {
     await manager.start(['--normal', 'location'])
     expect(manager.isActivated).toBe(true)
+    await helper.wait(200)
     let line = await helper.getCmdline()
     expect(line).toBe('')
   })
 
   it('should respect nosort option', async () => {
     await manager.start(['--ignore-case', '--no-sort', 'location'])
-    await helper.wait(100)
+    await helper.wait(200)
     expect(manager.isActivated).toBe(true)
     await nvim.input('oo')
     await helper.wait(500)
@@ -131,7 +133,7 @@ describe('list options', () => {
 
   it('should respect ignorecase option', async () => {
     await manager.start(['--ignore-case', '--strict', 'location'])
-    await helper.wait(100)
+    await helper.wait(200)
     expect(manager.isActivated).toBe(true)
     await nvim.input('bar')
     await helper.wait(500)
@@ -144,6 +146,7 @@ describe('list options', () => {
   it('should respect top option', async () => {
     await manager.start(['--top', 'location'])
     expect(manager.isActivated).toBe(true)
+    await helper.wait(300)
     let nr = await nvim.call('winnr')
     expect(nr).toBe(1)
   })
@@ -180,7 +183,7 @@ describe('list configuration', () => {
   it('should change indicator', async () => {
     helper.updateConfiguration('list.indicator', '>>')
     await manager.start(['location'])
-    await helper.wait(100)
+    await helper.wait(300)
     let line = await helper.getCmdline()
     expect(line).toMatch('>>')
   })
@@ -193,6 +196,23 @@ describe('list configuration', () => {
     let height = await win.height
     expect(height).toBe(2)
     helper.updateConfiguration('list.maxHeight', 12)
+  })
+
+  it('should split right for preview window', async () => {
+    helper.updateConfiguration('list.previewSplitRight', true)
+    let win = await nvim.window
+    await manager.start(['location'])
+    await helper.wait(100)
+    await manager.doAction('preview')
+    await helper.wait(100)
+    manager.prompt.cancel()
+    await helper.wait(10)
+    await nvim.call('win_gotoid', [win.id])
+    await nvim.command('wincmd l')
+    let curr = await nvim.window
+    let isPreview = await curr.getOption('previewwindow')
+    expect(isPreview).toBe(true)
+    helper.updateConfiguration('list.previewSplitRight', false)
   })
 
   it('should change autoResize', async () => {
@@ -274,5 +294,30 @@ describe('list configuration', () => {
     await helper.wait(100)
     let has = await nvim.call('coc#list#has_preview')
     expect(has).toBe(1)
+  })
+
+  it('should resolve list item', async () => {
+    let list: IList = {
+      name: 'test',
+      actions: [{
+        name: 'open', execute: _item => {
+          // noop
+        }
+      }],
+      defaultAction: 'open',
+      loadItems: () => {
+        return Promise.resolve([{ label: 'foo' }, { label: 'bar' }])
+      },
+      resolveItem: item => {
+        item.label = item.label.slice(0, 1)
+        return Promise.resolve(item)
+      }
+    }
+    let disposable = manager.registerList(list)
+    await manager.start(['--normal', 'test'])
+    await helper.wait(500)
+    let line = await nvim.line
+    expect(line).toBe('f')
+    disposable.dispose()
   })
 })

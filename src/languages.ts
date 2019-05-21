@@ -1,5 +1,6 @@
 import { Neovim } from '@chemzqm/neovim'
-import { CancellationToken, CancellationTokenSource, CodeAction, CodeActionContext, CodeActionKind, CodeLens, ColorInformation, ColorPresentation, CompletionItem, CompletionItemKind, CompletionList, CompletionTriggerKind, Disposable, DocumentHighlight, DocumentLink, DocumentSelector, DocumentSymbol, FoldingRange, FormattingOptions, Hover, InsertTextFormat, Location, LocationLink, Position, Range, SignatureHelp, SymbolInformation, TextDocument, TextEdit, WorkspaceEdit, SelectionRange } from 'vscode-languageserver-protocol'
+import { CancellationToken, CancellationTokenSource, CodeAction, CodeActionContext, CodeActionKind, CodeLens, ColorInformation, ColorPresentation, CompletionItem, CompletionItemKind, CompletionList, CompletionTriggerKind, Disposable, DocumentHighlight, DocumentLink, DocumentSelector, DocumentSymbol, FoldingRange, FormattingOptions, Hover, InsertTextFormat, Location, LocationLink, Position, Range, SignatureHelp, SymbolInformation, TextDocument, TextEdit, WorkspaceEdit } from 'vscode-languageserver-protocol'
+import { SelectionRange } from 'vscode-languageserver-protocol/lib/protocol.selectionRange.proposed'
 import commands from './commands'
 import diagnosticManager from './diagnostic/manager'
 import Document from './model/document'
@@ -25,7 +26,6 @@ import SignatureManager from './provider/signatureManager'
 import TypeDefinitionManager from './provider/typeDefinitionManager'
 import WorkspaceSymbolManager from './provider/workspaceSymbolsManager'
 import snippetManager from './snippets/manager'
-import { SnippetParser } from './snippets/parser'
 import sources from './sources'
 import { CompleteOption, CompleteResult, CompletionContext, DiagnosticCollection, Documentation, ISource, SourceType, VimCompleteItem } from './types'
 import { wait } from './util'
@@ -299,37 +299,25 @@ class Languages {
 
   @check
   public async getDeclaration(document: TextDocument, position: Position): Promise<Location[] | Location | LocationLink[] | null> {
-    if (!this.declarationManager.hasProvider(document)) {
-      workspace.showMessage('Declaration provider not found for current document', 'error')
-      return null
-    }
+    if (!this.declarationManager.hasProvider(document)) return null
     return await this.declarationManager.provideDeclaration(document, position, this.token)
   }
 
   @check
   public async getTypeDefinition(document: TextDocument, position: Position): Promise<Location[]> {
-    if (!this.typeDefinitionManager.hasProvider(document)) {
-      workspace.showMessage('Type definition provider not found for current document', 'error')
-      return null
-    }
+    if (!this.typeDefinitionManager.hasProvider(document)) return null
     return await this.typeDefinitionManager.provideTypeDefinition(document, position, this.token)
   }
 
   @check
   public async getImplementation(document: TextDocument, position: Position): Promise<Location[]> {
-    if (!this.implementatioinManager.hasProvider(document)) {
-      workspace.showMessage('Implementation provider not found for current document', 'error')
-      return null
-    }
+    if (!this.implementatioinManager.hasProvider(document)) return null
     return await this.implementatioinManager.provideReferences(document, position, this.token)
   }
 
   @check
   public async getReferences(document: TextDocument, context: ReferenceContext, position: Position): Promise<Location[]> {
-    if (!this.referenceManager.hasProvider(document)) {
-      workspace.showMessage('References provider not found for current document', 'error')
-      return null
-    }
+    if (!this.referenceManager.hasProvider(document)) return null
     return await this.referenceManager.provideReferences(document, position, context, this.token)
   }
 
@@ -616,7 +604,9 @@ class Languages {
           })
         }
         await this.applyAdditionalEdits(additionalTextEdits, opt.bufnr, snippet)
-        if (snippet) await snippetManager.selectCurrentPlaceholder()
+        if (snippet && !snippetManager.isPlainText(item.textEdit.newText)) {
+          await snippetManager.selectCurrentPlaceholder()
+        }
         if (item.command) commands.execute(item.command)
         doc = null
       },
@@ -645,13 +635,6 @@ class Languages {
     let { line, bufnr, linenr } = option
     let { range, newText } = textEdit
     let isSnippet = item.insertTextFormat === InsertTextFormat.Snippet
-    if (isSnippet) {
-      let snippet = (new SnippetParser()).parse(newText, true)
-      if (snippet.placeholders.every(p => p.isFinalTabstop == true)) {
-        isSnippet = false
-        newText = snippet.toString()
-      }
-    }
     // replace inserted word
     let start = line.substr(0, range.start.character)
     let end = line.substr(range.end.character)
@@ -662,7 +645,8 @@ class Languages {
         newText: `${start}${end}\n`
       }])
       // can't select, since additionalTextEdits would break selection
-      return await snippetManager.insertSnippet(newText, false, Position.create(linenr - 1, range.start.character))
+      let pos = Position.create(linenr - 1, range.start.character)
+      return await snippetManager.insertSnippet(newText, false, Range.create(pos, pos))
     }
     let newLines = `${start}${newText}${end}`.split('\n')
     if (newLines.length == 1) {

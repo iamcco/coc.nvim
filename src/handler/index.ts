@@ -1,13 +1,13 @@
 import { NeovimClient as Neovim } from '@chemzqm/neovim'
 import binarySearch from 'binary-search'
-import { CancellationTokenSource, CodeAction, CodeActionContext, CodeActionKind, Definition, Disposable, DocumentHighlight, DocumentHighlightKind, DocumentLink, DocumentSymbol, ExecuteCommandParams, ExecuteCommandRequest, Hover, Location, LocationLink, MarkedString, MarkupContent, Position, Range, SymbolInformation, SymbolKind, TextEdit, SelectionRange } from 'vscode-languageserver-protocol'
-import Uri from 'vscode-uri'
+import { CancellationTokenSource, CodeAction, CodeActionContext, CodeActionKind, Definition, Disposable, DocumentLink, DocumentSymbol, ExecuteCommandParams, ExecuteCommandRequest, Hover, Location, LocationLink, MarkedString, MarkupContent, Position, Range, SymbolInformation, TextEdit } from 'vscode-languageserver-protocol'
+import { SelectionRange } from 'vscode-languageserver-protocol/lib/protocol.selectionRange.proposed'
 import commandManager from '../commands'
 import diagnosticManager from '../diagnostic/manager'
 import events from '../events'
 import extensions from '../extensions'
 import languages from '../languages'
-import Document from '../model/document'
+import listManager from '../list/manager'
 import FloatFactory from '../model/floatFactory'
 import { TextDocumentContentProvider } from '../provider'
 import services from '../services'
@@ -15,13 +15,14 @@ import snippetManager from '../snippets/manager'
 import { Documentation } from '../types'
 import { disposeAll, wait } from '../util'
 import { getSymbolKind } from '../util/convert'
+import { equals } from '../util/object'
 import { positionInRange } from '../util/position'
-import { byteSlice, indexOf, isWord } from '../util/string'
+import { byteSlice, isWord } from '../util/string'
 import workspace from '../workspace'
 import CodeLensManager from './codelens'
 import Colors from './colors'
+import DocumentHighlighter from './documentHighlight'
 import debounce = require('debounce')
-import { equals } from '../util/object'
 const logger = require('../util/logger')('Handler')
 const pairs: Map<string, string> = new Map([
   ['<', '>'],
@@ -68,14 +69,13 @@ interface Preferences {
 
 export default class Handler {
   private preferences: Preferences
+  private documentHighlighter: DocumentHighlighter
   /*bufnr and srcId list*/
-  private highlightsMap: Map<number, number[]> = new Map()
   private hoverPosition: [number, number, number]
   private colors: Colors
   private hoverFactory: FloatFactory
   private signatureFactory: FloatFactory
   private documentLines: string[] = []
-  private currentSymbols: SymbolInformation[]
   private codeLensManager: CodeLensManager
   private signatureTokenSource: CancellationTokenSource
   private disposables: Disposable[] = []
@@ -87,7 +87,6 @@ export default class Handler {
         this.getPreferences()
       }
     })
-
     this.hoverFactory = new FloatFactory(nvim, workspace.env)
     let { signaturePreferAbove, signatureMaxHeight } = this.preferences
     this.signatureFactory = new FloatFactory(nvim, workspace.env, signaturePreferAbove, signatureMaxHeight)
@@ -161,13 +160,9 @@ export default class Handler {
     }, null, this.disposables)
 
     events.on('InsertLeave', async bufnr => {
+      await wait(30)
+      if (workspace.insertMode) return
       await this.onCharacterType('\n', bufnr, true)
-    }, null, this.disposables)
-    events.on('BufUnload', async bufnr => {
-      this.clearHighlight(bufnr)
-    }, null, this.disposables)
-    events.on('InsertEnter', async () => {
-      this.clearHighlight(workspace.bufnr)
     }, null, this.disposables)
     events.on('CursorMoved', debounce((bufnr: number, cursor: [number, number]) => {
       if (!this.preferences.previewAutoClose || !this.hoverPosition) return
@@ -179,6 +174,7 @@ export default class Handler {
         nvim.command('pclose', true)
       }
     }, 100), null, this.disposables)
+
     if (this.preferences.currentFunctionSymbolAutoUpdate) {
       events.on('CursorHold', async () => {
         await this.getCurrentFunctionSymbol()
@@ -200,6 +196,7 @@ export default class Handler {
     this.disposables.push(workspace.registerTextDocumentContentProvider('coc', provider))
     this.codeLensManager = new CodeLensManager(nvim)
     this.colors = new Colors(nvim)
+    this.documentHighlighter = new DocumentHighlighter(nvim, this.colors)
   }
 
   public async getCurrentFunctionSymbol(): Promise<string> {
@@ -208,8 +205,8 @@ export default class Handler {
     let symbols = await this.getDocumentSymbols()
 
     if (!symbols || symbols.length === 0) {
-        buffer.setVar('coc_current_function', '', true)
-        return ''
+      buffer.setVar('coc_current_function', '', true)
+      return ''
     }
     symbols = symbols.filter(s => [
       'Class',
@@ -227,16 +224,17 @@ export default class Handler {
     // `binarySearch` will return a negative index, which is 2 indices offset to the closest symbol.
     let symbolPosition = binarySearch(symbols, position.line + 1, (e, n) => e.lnum - n)
     if (symbolPosition < 0) {
-        symbolPosition *= -1
-        symbolPosition -= 2
+      symbolPosition *= -1
+      symbolPosition -= 2
     }
 
     const currentFunctionName = (() => {
       const sym = symbols[symbolPosition]
-      if (!sym || (position.line > sym.range.end.line)) {
+      const range = sym && (sym.range || sym.selectionRange)
+      if (!sym || !range || (position.line > range.end.line)) {
         return ''
       } else {
-          return sym.text
+        return sym.text
       }
     })()
     buffer.setVar('coc_current_function', currentFunctionName, true)
@@ -250,6 +248,7 @@ export default class Handler {
     if (hovers && hovers.length) {
       await this.previewHover(hovers)
     } else {
+      workspace.showMessage('No definition found.', 'warning')
       let target = this.preferences.hoverTarget
       if (target == 'float') {
         this.hoverFactory.close()
@@ -262,47 +261,50 @@ export default class Handler {
   public async gotoDefinition(openCommand?: string): Promise<void> {
     let { document, position } = await workspace.getCurrentState()
     let definition = await languages.getDefinition(document, position)
-    if (definition && definition.length != 0) {
-      await this.handleLocations(definition, openCommand)
+    if (isEmpty(definition)) {
+      this.onEmptyLocation('Definition', definition)
     } else {
-      workspace.showMessage('Definition not found', 'warning')
+      await this.handleLocations(definition, openCommand)
     }
   }
 
   public async gotoDeclaration(openCommand?: string): Promise<void> {
     let { document, position } = await workspace.getCurrentState()
     let definition = await languages.getDeclaration(document, position)
-    if (!definition) return workspace.showMessage('Declaration not found', 'warning')
-    await this.handleLocations(definition, openCommand)
+    if (isEmpty(definition)) {
+      this.onEmptyLocation('Declaration', definition)
+    } else {
+      await this.handleLocations(definition, openCommand)
+    }
   }
 
   public async gotoTypeDefinition(openCommand?: string): Promise<void> {
     let { document, position } = await workspace.getCurrentState()
     let definition = await languages.getTypeDefinition(document, position)
-    if (definition && definition.length != 0) {
-      await this.handleLocations(definition, openCommand)
+    if (isEmpty(definition)) {
+      this.onEmptyLocation('Type definition', definition)
     } else {
-      workspace.showMessage('Type definition not found', 'warning')
+      await this.handleLocations(definition, openCommand)
     }
   }
 
   public async gotoImplementation(openCommand?: string): Promise<void> {
     let { document, position } = await workspace.getCurrentState()
     let definition = await languages.getImplementation(document, position)
-    if (definition && definition.length != 0) {
-      await this.handleLocations(definition, openCommand)
+    if (isEmpty(definition)) {
+      this.onEmptyLocation('Implementation', definition)
     } else {
-      workspace.showMessage('Implementation not found', 'warning')
+      await this.handleLocations(definition, openCommand)
     }
   }
 
   public async gotoReferences(openCommand?: string): Promise<void> {
     let { document, position } = await workspace.getCurrentState()
     let locs = await languages.getReferences(document, { includeDeclaration: false }, position)
-    if (locs && locs.length) {
-      await this.handleLocations(locs, openCommand)
+    if (isEmpty(locs)) {
+      this.onEmptyLocation('References', locs)
     } else {
-      workspace.showMessage('References not found', 'warning')
+      await this.handleLocations(locs, openCommand)
     }
   }
 
@@ -347,41 +349,6 @@ export default class Handler {
       }
     }
     return res
-  }
-
-  public async getWorkspaceSymbols(): Promise<SymbolInfo[]> {
-    let document = await workspace.document
-    if (!document) return
-    let cword = await this.nvim.call('expand', '<cword>')
-    let query = await this.nvim.call('input', ['Query:', cword])
-    let symbols = await languages.getWorkspaceSymbols(document.textDocument, query)
-    if (!symbols) {
-      workspace.showMessage('service does not support workspace symbols', 'error')
-      return []
-    }
-    this.currentSymbols = symbols
-    let res: SymbolInfo[] = []
-    for (let s of symbols) {
-      if (!this.validWorkspaceSymbol(s)) continue
-      let { name, kind, location } = s
-      let { start } = location.range
-      res.push({
-        filepath: Uri.parse(location.uri).fsPath,
-        col: start.character + 1,
-        lnum: start.line + 1,
-        text: name,
-        kind: getSymbolKind(kind),
-        selectionRange: location.range
-      })
-    }
-    return res
-  }
-
-  public async resolveWorkspaceSymbol(symbolIndex: number): Promise<SymbolInformation> {
-    if (!this.currentSymbols) return null
-    let symbol = this.currentSymbols[symbolIndex]
-    if (!symbol) return null
-    return await languages.resolveWorkspaceSymbol(symbol)
   }
 
   public async rename(): Promise<void> {
@@ -462,7 +429,7 @@ export default class Handler {
       await events.fire('Command', [id])
       await commandManager.executeCommand(id, ...args)
     } else {
-      this.nvim.command(`CocList commands`, true)
+      await listManager.start(['commands'])
     }
   }
 
@@ -600,53 +567,9 @@ export default class Handler {
     await this.colors.pickPresentation()
   }
 
-  private async highlightDocument(document: Document): Promise<void> {
-    let position = await workspace.getCursorPosition()
-    let line = document.getline(position.line)
-    let ch = line[position.character]
-    if (!ch || !document.isWord(ch)) {
-      this.clearHighlight(document.bufnr)
-      return
-    }
-    let highlightNamespace = workspace.createNameSpace('coc-highlight')
-    if (this.colors.hasColorAtPostion(document.bufnr, position)) return
-    let highlights: DocumentHighlight[] = await languages.getDocumentHighLight(document.textDocument, position)
-    let newPosition = await workspace.getCursorPosition()
-    if (position.line != newPosition.line || position.character != newPosition.character) {
-      return
-    }
-    let ids = this.highlightsMap.get(document.bufnr)
-    if (workspace.isVim && workspace.bufnr != document.bufnr) return
-    this.nvim.pauseNotification()
-    if (ids && ids.length) {
-      this.clearHighlight(document.bufnr)
-    }
-    if (highlights && highlights.length) {
-      let groups: { [index: string]: Range[] } = {}
-      for (let hl of highlights) {
-        let hlGroup = hl.kind == DocumentHighlightKind.Text
-          ? 'CocHighlightText'
-          : hl.kind == DocumentHighlightKind.Read ? 'CocHighlightRead' : 'CocHighlightWrite'
-        groups[hlGroup] = groups[hlGroup] || []
-        groups[hlGroup].push(hl.range)
-      }
-      let ids = []
-      for (let hlGroup of Object.keys(groups)) {
-        let ranges = groups[hlGroup]
-        let arr = document.highlightRanges(ranges, hlGroup, highlightNamespace)
-        ids.push(...arr)
-        this.highlightsMap.set(document.bufnr, ids)
-      }
-    }
-    this.nvim.resumeNotification().catch(_e => {
-      // noop
-    })
-  }
-
   public async highlight(): Promise<void> {
-    let document = workspace.getDocument(workspace.bufnr)
-    if (!document) return
-    await this.highlightDocument(document)
+    let bufnr = await this.nvim.call('bufnr', '%')
+    await this.documentHighlighter.highlight(bufnr)
   }
 
   public async links(): Promise<DocumentLink[]> {
@@ -682,22 +605,6 @@ export default class Handler {
         }
         return false
       }
-    }
-  }
-
-  private validWorkspaceSymbol(symbol: SymbolInformation): boolean {
-    switch (symbol.kind) {
-      case SymbolKind.Namespace:
-      case SymbolKind.Class:
-      case SymbolKind.Module:
-      case SymbolKind.Method:
-      case SymbolKind.Package:
-      case SymbolKind.Interface:
-      case SymbolKind.Function:
-      case SymbolKind.Constant:
-        return true
-      default:
-        return false
     }
   }
 
@@ -801,15 +708,13 @@ export default class Handler {
             let after = c.label.slice(nameIndex == -1 ? 0 : nameIndex)
             paramDoc = active.documentation
             if (typeof active.label === 'string') {
-              let startIndex = activeParameter == 0 ? 0 : indexOf(after, ',', activeParameter)
-              startIndex = startIndex == -1 ? 0 : startIndex
-              let str = after.slice(startIndex)
+              let str = after.slice(0)
               let ms = str.match(new RegExp('\\b' + active.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b'))
               let index = ms ? ms.index : str.indexOf(active.label)
               if (index != -1) {
                 activeIndexes = [
-                  index + startIndex + nameIndex,
-                  index + startIndex + active.label.length + nameIndex
+                  index + nameIndex,
+                  index + active.label.length + nameIndex
                 ]
               }
             } else {
@@ -871,25 +776,25 @@ export default class Handler {
               let start: number
               let end: number
               if (typeof active.label === 'string') {
-                let startIndex = activeParameter == 0 ? 0 : indexOf(after, ',', activeParameter)
-                startIndex = startIndex == -1 ? 0 : startIndex
-                let str = after.slice(startIndex)
+                let str = after.slice(0)
                 let ms = str.match(new RegExp('\\b' + active.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b'))
                 let idx = ms ? ms.index : str.indexOf(active.label)
                 if (idx == -1) {
                   parts.push({ text: after, type: 'Normal' })
-                  continue
+                } else {
+                  start = idx
+                  end = idx + active.label.length
                 }
-                start = idx + startIndex
-                end = idx + startIndex + active.label.length
               } else {
                 [start, end] = active.label
                 start = start - nameIndex
                 end = end - nameIndex
               }
-              parts.push({ text: after.slice(0, start), type: 'Normal' })
-              parts.push({ text: after.slice(start, end), type: 'MoreMsg' })
-              parts.push({ text: after.slice(end), type: 'Normal' })
+              if (start != null && end != null) {
+                parts.push({ text: after.slice(0, start), type: 'Normal' })
+                parts.push({ text: after.slice(start, end), type: 'MoreMsg' })
+                parts.push({ text: after.slice(end), type: 'Normal' })
+              }
             }
           } else {
             parts.push({
@@ -904,25 +809,21 @@ export default class Handler {
     }
   }
 
-  public async handleLocations(definition: Definition | LocationLink[], openCommand?: string): Promise<void> {
+  public async handleLocations(definition: Definition | LocationLink[], openCommand?: string | false): Promise<void> {
     if (!definition) return
-    if (Array.isArray(definition)) {
-      let len = definition.length
-      if (len == 0) return
-      if (len == 1) {
-        let location = definition[0] as Location
-        if (LocationLink.is(definition[0])) {
-          let link = definition[0] as LocationLink
-          location = Location.create(link.targetUri, link.targetRange)
-        }
-        let { uri, range } = location
-        await workspace.jumpTo(uri, range.start, openCommand)
-      } else {
-        await workspace.showLocations(definition as Location[])
+    let locations: Location[] = Array.isArray(definition) ? definition as Location[] : [definition]
+    let len = locations.length
+    if (len == 0) return
+    if (len == 1 && openCommand !== false) {
+      let location = definition[0] as Location
+      if (LocationLink.is(definition[0])) {
+        let link = definition[0] as LocationLink
+        location = Location.create(link.targetUri, link.targetRange)
       }
-    } else {
-      let { uri, range } = definition as Location
+      let { uri, range } = location
       await workspace.jumpTo(uri, range.start, openCommand)
+    } else {
+      await workspace.showLocations(definition as Location[])
     }
   }
 
@@ -974,7 +875,10 @@ export default class Handler {
       i++
     }
     if (target == 'echo') {
-      await this.nvim.call('coc#util#echo_hover', lines.join('\n').trim())
+      const msg = lines.join('\n').trim()
+      if (msg.length) {
+        await this.nvim.call('coc#util#echo_hover', msg)
+      }
     } else if (target == 'float') {
       diagnosticManager.hideFloat()
       await this.hoverFactory.create(docs)
@@ -983,15 +887,6 @@ export default class Handler {
       let arr = await this.nvim.call('getcurpos') as number[]
       this.hoverPosition = [workspace.bufnr, arr[1], arr[2]]
       await this.nvim.command(`pedit coc://document`)
-    }
-  }
-
-  private clearHighlight(bufnr: number): void {
-    let doc = workspace.getDocument(bufnr)
-    let ids = this.highlightsMap.get(bufnr)
-    if (ids && ids.length) {
-      this.highlightsMap.delete(bufnr)
-      if (doc) doc.clearMatchIds(ids)
     }
   }
 
@@ -1025,6 +920,14 @@ export default class Handler {
     let line = await this.nvim.call('getline', '.')
     let content = byteSlice(line, 0, col - 1)
     return col == 1 ? '' : content[content.length - 1]
+  }
+
+  private onEmptyLocation(name: string, location: any | null): void {
+    if (location == null) {
+      workspace.showMessage(`${name} provider not found for current document`, 'warning')
+    } else if (location.length == 0) {
+      workspace.showMessage(`${name} not found`, 'warning')
+    }
   }
 
   public dispose(): void {
@@ -1083,15 +986,21 @@ function addDoucmentSymbol(res: SymbolInfo[], sym: DocumentSymbol, level: number
 }
 
 function sortSymbolInformations(a: SymbolInformation, b: SymbolInformation): number {
-    let sa = a.location.range.start
-    let sb = b.location.range.start
-    let d = sa.line - sb.line
-    return d == 0 ? sa.character - sb.character : d
+  let sa = a.location.range.start
+  let sb = b.location.range.start
+  let d = sa.line - sb.line
+  return d == 0 ? sa.character - sb.character : d
 
 }
 
 function isDocumentSymbol(a: DocumentSymbol | SymbolInformation): a is DocumentSymbol {
   return a && !a.hasOwnProperty('location')
+}
+
+function isEmpty(location: any): boolean {
+  if (!location) return true
+  if (Array.isArray(location) && location.length == 0) return true
+  return false
 }
 
 function isDocumentSymbols(a: DocumentSymbol[] | SymbolInformation[]): a is DocumentSymbol[] {

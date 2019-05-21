@@ -6,11 +6,12 @@ import Document from '../model/document'
 import FloatFactory from '../model/floatFactory'
 import { ConfigurationChangeEvent, DiagnosticItem, Documentation } from '../types'
 import { disposeAll, wait } from '../util'
-import { comparePosition, positionInRange, lineInRange } from '../util/position'
+import { comparePosition, positionInRange, lineInRange, rangeIntersect } from '../util/position'
 import workspace from '../workspace'
 import { DiagnosticBuffer } from './buffer'
 import DiagnosticCollection from './collection'
 import { getSeverityName, getSeverityType, severityLevel } from './util'
+import { equals } from '../util/object'
 const logger = require('../util/logger')('diagnostic-manager')
 
 export interface DiagnosticConfig {
@@ -47,6 +48,7 @@ export class DiagnosticManager implements Disposable {
   private disposables: Disposable[] = []
   private lastMessage = ''
   private timer: NodeJS.Timer
+  private lastShown: Diagnostic[]
 
   public init(): void {
     this.setConfiguration()
@@ -70,14 +72,14 @@ export class DiagnosticManager implements Disposable {
       if (this.timer) clearTimeout(this.timer)
     }, null, this.disposables)
 
-    events.on('InsertLeave', async () => {
+    events.on('InsertLeave', async bufnr => {
       this.floatFactory.close()
-      let { refreshOnInsertMode, refreshAfterSave } = this.config
-      let { bufnr } = workspace
       let doc = workspace.getDocument(bufnr)
-      if (!this.shouldValidate(doc)) return
+      if (!doc || !this.shouldValidate(doc)) return
+      let { refreshOnInsertMode, refreshAfterSave } = this.config
       if (!refreshOnInsertMode && !refreshAfterSave) {
         await wait(500)
+        if (workspace.insertMode) return
         this.refreshBuffer(doc.uri)
       }
     }, null, this.disposables)
@@ -229,10 +231,14 @@ export class DiagnosticManager implements Disposable {
    */
   public getDiagnostics(uri: string): ReadonlyArray<Diagnostic> {
     let collections = this.getCollections(uri)
+    let { level } = this.config
     let res: Diagnostic[] = []
     for (let collection of collections) {
       let items = collection.get(uri)
       if (!items) continue
+      if (level && level < DiagnosticSeverity.Hint) {
+        items = items.filter(s => s.severity == null || s.severity <= level)
+      }
       res.push(...items)
     }
     res.sort((a, b) => {
@@ -249,16 +255,12 @@ export class DiagnosticManager implements Disposable {
 
   public getDiagnosticsInRange(document: TextDocument, range: Range): Diagnostic[] {
     let collections = this.getCollections(document.uri)
-    let si = document.offsetAt(range.start)
-    let ei = document.offsetAt(range.end)
     let res: Diagnostic[] = []
     for (let collection of collections) {
       let items = collection.get(document.uri)
       if (!items) continue
       for (let item of items) {
-        let { range } = item
-        if (withIn(document.offsetAt(range.start), si, ei)
-          || withIn(document.offsetAt(range.end), si, ei)) {
+        if (rangeIntersect(item.range, range)) {
           res.push(item)
         }
       }
@@ -367,6 +369,16 @@ export class DiagnosticManager implements Disposable {
       if (checkCurrentLine) return lineInRange(pos.line, o.range)
       return positionInRange(pos, o.range) == 0
     })
+    if (truncate) {
+      if (diagnostics.length && this.lastShown && equals(this.lastShown, diagnostics)) {
+        let activated = await this.floatFactory.activated()
+        if (activated) {
+          this.floatFactory.close()
+          return
+        }
+      }
+      this.lastShown = diagnostics
+    }
     if (diagnostics.length == 0) {
       if (useFloat) {
         this.floatFactory.close()
@@ -505,7 +517,7 @@ export class DiagnosticManager implements Disposable {
               lnum: range.start.line + 1,
               col: range.start.character + 1,
               end_lnum: range.end.line + 1,
-              enc_col: range.end.character + 1,
+              end_col: range.end.character + 1,
               type: getSeverityType(o.severity)
             }
           })

@@ -49,7 +49,7 @@ export function ansiparse(str: string): AnsiItem[] {
   // |     matchingData
   // matchingControl
   //
-  // \033\[K
+  // \033\[K or \033\[m
   //
   // In further steps we hope it's all going to be fine. It usually is.
   //
@@ -93,6 +93,13 @@ export function ansiparse(str: string): AnsiItem[] {
           result.push(state)
           state = {}
           matchingText = ''
+        }
+        if (matchingText == '' && (str[i + 1] == 'm' || str[i + 1] == 'K')) {
+          if (state.foreground || state.background) {
+            state.text = ''
+            result.push(state)
+          }
+          state = {}
         }
 
         matchingControl = null

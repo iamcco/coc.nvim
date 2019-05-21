@@ -9,7 +9,7 @@ import FileSystemWatcher from './model/fileSystemWatcher'
 import { ProviderResult, TextDocumentContentProvider } from './provider'
 
 export type MsgTypes = 'error' | 'warning' | 'more'
-export type ExtensionState = 'disabled' | 'loaded' | 'activited' | 'unknown'
+export type ExtensionState = 'disabled' | 'loaded' | 'activated' | 'unknown'
 
 export interface TaskOptions {
   cmd: string
@@ -306,6 +306,7 @@ export interface LanguageServerConfig {
   transportPort?: number
   disableWorkspaceFolders?: boolean
   filetypes: string[]
+  additionalSchemes: string[]
   enable: boolean
   args?: string[]
   cwd?: string
@@ -386,17 +387,6 @@ export interface DiagnosticItem {
   location: Location
 }
 
-// Config property of source
-export interface SourceConfig {
-  name: string
-  sourceType?: SourceType
-  triggerCharacters?: string[]
-  optionalFns?: string[]
-  shortcut?: string
-  filepath?: string
-  isSnippet?: boolean
-}
-
 export interface RecentScore {
   [index: string]: number
 }
@@ -435,6 +425,7 @@ export interface CompleteOption {
   readonly source?: string
   readonly blacklist: string[]
   triggerForInComplete?: boolean
+  preserved?: CompleteResult[]
 }
 
 export interface PumBounding {
@@ -654,13 +645,20 @@ export interface IServiceProvider {
   onServiceReady: Event<void>
 }
 
+export interface LocationWithLine {
+  uri: string
+  line: string
+  text?: string
+}
+
 export interface ListItem {
   label: string
   filterText?: string
-  location?: Location
+  location?: Location | LocationWithLine | string
   data?: any
   recentScore?: number
   ansiHighlights?: AnsiHighlight[]
+  resolved?: boolean
 }
 
 export interface ListHighlights {
@@ -724,23 +722,62 @@ export interface ListTask {
 }
 
 export interface ListArgument {
+  key?: string
+  hasValue?: boolean
   name: string
   description: string
 }
 
 export interface IList {
+  /**
+   * Unique name of list.
+   */
   name: string
-  // support interactive mode
-  interactive?: boolean
-  description?: string
-  detail?: string
-  options?: ListArgument[]
-  searchHighlight?: boolean
-  defaultAction: string
+  /**
+   * Action list.
+   */
   actions: ListAction[]
+  /**
+   * Default action name.
+   */
+  defaultAction: string
+  /**
+   * Load list items.
+   */
   loadItems(context: ListContext, token: CancellationToken): Promise<ListItem[] | ListTask | null | undefined>
-  doHighlight(): void
-  dispose(): void
+  /**
+   * Resolve list item.
+   */
+  resolveItem?(item: ListItem): Promise<ListItem | null>
+  /**
+   * Should be true when interactive is supported.
+   */
+  interactive?: boolean
+  /**
+   * Description of list.
+   */
+  description?: string
+  /**
+   * Detail description, shown in help.
+   */
+  detail?: string
+  /**
+   * Options supported by list.
+   */
+  options?: ListArgument[]
+  /**
+   * Highlight buffer by vim's syntax commands.
+   */
+  doHighlight?(): void
+  dispose?(): void
+}
+
+export interface PreiewOptions {
+  bufname: string
+  sketch: boolean
+  filetype: string
+  lines?: string[]
+  lnum?: number
 }
 
 export interface AnsiItem {
@@ -755,10 +792,12 @@ export interface AnsiItem {
 export interface ISource {
   // identifier
   name: string
-  enable: boolean
-  priority: number
-  sourceType: SourceType
+  enable?: boolean
+  priority?: number
+  sourceType?: SourceType
   triggerCharacters?: string[]
+  // should only be used when trigger match.
+  triggerOnly?: boolean
   // regex to detect trigger completetion, ignored when triggerCharacters exists.
   triggerPatterns?: RegExp[]
   disableSyntaxes?: string[]
@@ -802,7 +841,7 @@ export interface ISource {
    * @param {CancellationToken} token
    * @returns {Promise<CompleteResult | null>}
    */
-  doComplete(opt: CompleteOption, token: CancellationToken): Promise<CompleteResult | null>
+  doComplete(opt: CompleteOption, token: CancellationToken): ProviderResult<CompleteResult | null>
   /**
    * Action for complete item on complete item selected
    *
@@ -811,7 +850,7 @@ export interface ISource {
    * @param {CancellationToken} token
    * @returns {Promise<void>}
    */
-  onCompleteResolve?(item: VimCompleteItem, token: CancellationToken): Promise<void> | void
+  onCompleteResolve?(item: VimCompleteItem, token: CancellationToken): ProviderResult<void> | void
   /**
    * Action for complete item on complete done
    *
@@ -819,9 +858,16 @@ export interface ISource {
    * @param {VimCompleteItem} item
    * @returns {Promise<void>}
    */
-  onCompleteDone?(item: VimCompleteItem, opt: CompleteOption): Promise<void>
+  onCompleteDone?(item: VimCompleteItem, opt: CompleteOption): ProviderResult<void>
 
   shouldCommit?(item: VimCompleteItem, character: string): boolean
+}
+
+// Config property of source
+export interface SourceConfig extends ISource {
+  filepath?: string
+  optionalFns?: string[]
+  shortcut?: string
 }
 
 /**
@@ -958,6 +1004,7 @@ export interface OutputChannel {
    */
   readonly name: string
 
+  readonly content: string
   /**
    * Append the given value to the channel.
    *

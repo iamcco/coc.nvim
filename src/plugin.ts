@@ -1,6 +1,7 @@
 import { NeovimClient as Neovim } from '@chemzqm/neovim'
 import { EventEmitter } from 'events'
 import https from 'https'
+import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import semver from 'semver'
@@ -21,7 +22,7 @@ import debounce = require('debounce')
 const logger = require('./util/logger')('plugin')
 
 export default class Plugin extends EventEmitter {
-  private ready = false
+  private _ready = false
   private handler: Handler
   private infoChannel: OutputChannel
 
@@ -47,13 +48,18 @@ export default class Plugin extends EventEmitter {
     })
     this.addMethod('installExtensions', debounce(async () => {
       let list = await nvim.getVar('coc_global_extensions') as string[]
-      return extensions.installExtensions(list)
+      await extensions.installExtensions(list)
     }, 200))
     this.addMethod('commandList', () => {
       return commandManager.commandList.map(o => o.id)
     })
     this.addMethod('openList', async (...args: string[]) => {
+      await this.ready
       await listManager.start(args)
+    })
+    this.addMethod('runCommand', async (...args: string[]) => {
+      await this.ready
+      await this.handler.runCommand(...args)
     })
     this.addMethod('listResume', () => {
       return listManager.resume()
@@ -94,7 +100,7 @@ export default class Plugin extends EventEmitter {
       }
     })
     this.addMethod('openLog', async () => {
-      let file = process.env.NVIM_COC_LOG_FILE || path.join(os.tmpdir(), 'coc-nvim.log')
+      let file = process.env.NVIM_COC_LOG_FILE || path.join(os.tmpdir(), `coc-nvim-${process.pid}.log`)
       let escaped = await this.nvim.call('fnameescape', file)
       await this.nvim.command(`edit ${escaped}`)
     })
@@ -142,11 +148,11 @@ export default class Plugin extends EventEmitter {
       extensions.activateExtensions()
       nvim.setVar('coc_service_initialized', 1, true)
       nvim.call('coc#_init', [], true)
-      this.ready = true
-      logger.info(`coc initialized with node: ${process.version}`)
+      this._ready = true
+      logger.info(`coc ${this.version} initialized with node: ${process.version}`)
       this.emit('ready')
     } catch (e) {
-      this.ready = false
+      this._ready = false
       console.error(`Error on initialize: ${e.stack}`) // tslint:disable-line
       logger.error(e.stack)
     }
@@ -159,7 +165,20 @@ export default class Plugin extends EventEmitter {
     })
   }
 
-  public async findLocations(id: string, method: string, params: any, openCommand?: string): Promise<void> {
+  public get isReady(): boolean {
+    return this._ready
+  }
+
+  public get ready(): Promise<void> {
+    if (this._ready) return Promise.resolve()
+    return new Promise<void>(resolve => {
+      this.once('ready', () => {
+        resolve()
+      })
+    })
+  }
+
+  public async findLocations(id: string, method: string, params: any, openCommand?: string | false): Promise<void> {
     let { document, position } = await workspace.getCurrentState()
     params = params || {}
     Object.assign(params, {
@@ -168,7 +187,7 @@ export default class Plugin extends EventEmitter {
     })
     let res: any = await services.sendRequest(id, method, params)
     if (!res) {
-      workspace.showMessage(`Location of "${method}" not found!`, 'warning')
+      workspace.showMessage(`Locations of "${method}" not found!`, 'warning')
       return
     }
     let locations: Location[] = []
@@ -208,6 +227,10 @@ export default class Plugin extends EventEmitter {
     return false
   }
 
+  public get version(): string {
+    return workspace.version + (process.env.REVISION ? '-' + process.env.REVISION : '')
+  }
+
   public async showInfo(): Promise<void> {
     if (!this.infoChannel) {
       this.infoChannel = workspace.createOutputChannel('info')
@@ -215,13 +238,12 @@ export default class Plugin extends EventEmitter {
       this.infoChannel.clear()
     }
     let channel = this.infoChannel
-    channel.show()
     channel.appendLine('## versions')
     channel.appendLine('')
     let out = await this.nvim.call('execute', ['version']) as string
     channel.appendLine('vim version: ' + out.trim().split('\n', 2)[0])
     channel.appendLine('node version: ' + process.version)
-    channel.appendLine('coc.nvim version: ' + workspace.version + (process.env.REVISION ? '-' + process.env.REVISION : ''))
+    channel.appendLine('coc.nvim version: ' + this.version)
     channel.appendLine('term: ' + (process.env.TERM_PROGRAM || process.env.TERM))
     channel.appendLine('platform: ' + process.platform)
     channel.appendLine('')
@@ -229,13 +251,19 @@ export default class Plugin extends EventEmitter {
     let msgs = await this.nvim.call('coc#rpc#get_errors') as string[]
     channel.append(msgs.join('\n'))
     channel.appendLine('')
+    channel.appendLine('## Log of coc.nvim')
+    let file = process.env.NVIM_COC_LOG_FILE || path.join(os.tmpdir(), `coc-nvim-${process.pid}.log`)
+    let content = fs.readFileSync(file, 'utf8')
+    channel.append(content)
+    channel.appendLine('')
     for (let ch of (workspace as any).outputChannels.values()) {
       if (ch.name !== 'info') {
-        channel.appendLine(`## Output channel: ${ch.name}`)
+        channel.appendLine(`## Output channel: ${ch.name}\n`)
         channel.append(ch.content)
         channel.appendLine('')
       }
     }
+    channel.show()
   }
 
   public updateExtension(): Promise<void> {
@@ -282,7 +310,7 @@ export default class Plugin extends EventEmitter {
   }
 
   public async cocAction(...args: any[]): Promise<any> {
-    if (!this.ready) return
+    if (!this._ready) return
     let { handler } = this
     try {
       switch (args[0] as string) {
@@ -357,7 +385,8 @@ export default class Plugin extends EventEmitter {
           await handler.rename()
           return
         case 'workspaceSymbols':
-          return await handler.getWorkspaceSymbols()
+          this.nvim.command('CocList -I symbols', true)
+          return
         case 'formatSelected':
           return await handler.documentRangeFormatting(args[1])
         case 'format':

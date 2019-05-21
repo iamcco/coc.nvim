@@ -1,10 +1,11 @@
-import { DidChangeTextDocumentParams, Disposable, Position } from 'vscode-languageserver-protocol'
+import { DidChangeTextDocumentParams, Disposable, Position, Range } from 'vscode-languageserver-protocol'
 import events from '../events'
 import * as types from '../types'
 import workspace from '../workspace'
 import { SnippetSession } from './session'
 import * as Snippets from "./parser"
 import { SnippetVariableResolver } from './variableResolve'
+import { SnippetParser } from './parser'
 const logger = require('../util/logger')('snippets-manager')
 
 export class SnippetManager implements types.SnippetManager {
@@ -57,7 +58,7 @@ export class SnippetManager implements types.SnippetManager {
   /**
    * Insert snippet at current cursor position
    */
-  public async insertSnippet(snippet: string, select = true, position?: Position): Promise<boolean> {
+  public async insertSnippet(snippet: string, select = true, range?: Range): Promise<boolean> {
     let { nvim } = workspace
     let bufnr = await nvim.call('bufnr', '%')
     let session = this.getSession(bufnr)
@@ -71,7 +72,7 @@ export class SnippetManager implements types.SnippetManager {
         }
       })
     }
-    let isActive = await session.start(snippet, select, position)
+    let isActive = await session.start(snippet, select, range)
     if (isActive) {
       this.statusItem.show()
     } else if (session) {
@@ -79,6 +80,14 @@ export class SnippetManager implements types.SnippetManager {
     }
     nvim.command('silent! unlet g:coc_last_placeholder g:coc_selected_text', true)
     return isActive
+  }
+
+  public isPlainText(text: string): boolean {
+    let snippet = (new SnippetParser()).parse(text, true)
+    if (snippet.placeholders.every(p => p.isFinalTabstop == true)) {
+      return true
+    }
+    return false
   }
 
   public async selectCurrentPlaceholder(triggerAutocmd = true): Promise<void> {

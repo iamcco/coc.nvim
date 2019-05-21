@@ -28,19 +28,6 @@ afterEach(async () => {
   await helper.reset()
 })
 
-async function startCompletion(): Promise<void> {
-  let buf = await nvim.buffer
-  await buf.setLines(['foo ', 'bar '], {
-    start: 0,
-    end: 0,
-    strictIndexing: false
-  })
-  await nvim.call('cursor', [1, 1])
-  await nvim.input('Af')
-  await helper.waitPopup()
-  expect(completion.isActivted).toBe(true)
-}
-
 describe('completion events', () => {
 
   it('should load preferences', () => {
@@ -56,7 +43,7 @@ describe('completion events', () => {
   })
 })
 
-describe('completion#startCompletion', () => {
+describe('completion start', () => {
 
   it('should deactivate on doComplete error', async () => {
     let fn = (completion as any)._doComplete
@@ -80,7 +67,7 @@ describe('completion#startCompletion', () => {
     expect(completion.isActivted).toBe(true)
   })
 
-  it('should use resume input to filter', async () => {
+  it('should show slow source', async () => {
     let source: ISource = {
       priority: 0,
       enable: true,
@@ -95,79 +82,14 @@ describe('completion#startCompletion', () => {
         })
       }
     }
-    sources.addSource(source)
-    await helper.edit()
-    await nvim.input('i.')
-    await helper.wait(60)
-    await nvim.input('f')
-    await helper.waitPopup()
-    expect(completion.isActivted).toBe(true)
-    let items = await helper.items()
-    expect(items.length).toBe(1)
-    expect(items[0].word).toBe('foo')
-    sources.removeSource(source)
-  })
-
-  it('should complete inComplete source', async () => {
-    let source: ISource = {
-      priority: 0,
-      enable: true,
-      name: 'inComplete',
-      sourceType: SourceType.Service,
-      triggerCharacters: ['.'],
-      doComplete: async (opt: CompleteOption): Promise<CompleteResult> => {
-        await helper.wait(30)
-        if (opt.input.length <= 1) {
-          return { isIncomplete: true, items: [{ word: 'foo' }, { word: opt.input }] }
-        }
-        return { isIncomplete: false, items: [{ word: 'foo' }, { word: opt.input }] }
-      }
-    }
-    sources.addSource(source)
+    let disposable = sources.addSource(source)
     await helper.edit()
     await nvim.input('i.')
     await helper.waitPopup()
     expect(completion.isActivted).toBe(true)
     let items = await helper.items()
-    await nvim.input('a')
-    await helper.wait(10)
-    await nvim.input('b')
-    await helper.wait(100)
-    sources.removeSource(source)
-    items = await helper.items()
-    expect(items[0].word).toBe('ab')
-    await nvim.input('<esc>')
-  })
-
-  it('should not complete inComplete source when none keyword inserted', async () => {
-    let lastOption: CompleteOption
-    let source: ISource = {
-      priority: 0,
-      enable: true,
-      name: 'inComplete',
-      sourceType: SourceType.Service,
-      triggerCharacters: ['.'],
-      doComplete: async (opt: CompleteOption): Promise<CompleteResult> => {
-        lastOption = opt
-        await helper.wait(30)
-        if (opt.input.length <= 1) {
-          return { isIncomplete: true, items: [{ word: 'foo' }, { word: opt.input }] }
-        }
-        return { isIncomplete: false, items: [{ word: 'foo' }, { word: opt.input }] }
-      }
-    }
-    sources.addSource(source)
-    await helper.edit()
-    await nvim.input('i.')
-    await helper.waitPopup()
-    expect(completion.isActivted).toBe(true)
-    await nvim.input('a')
-    await helper.wait(10)
-    await nvim.input(',')
-    await helper.wait(300)
-    sources.removeSource(source)
-    expect(lastOption.triggerForInComplete).toBeFalsy()
-    await nvim.input('<esc>')
+    expect(items.length).toBe(2)
+    disposable.dispose()
   })
 })
 
@@ -221,6 +143,126 @@ describe('completion#resumeCompletion', () => {
     await nvim.input(' ')
     await helper.wait(60)
     expect(completion.isActivted).toBe(false)
+  })
+
+  it('should use resume input to filter', async () => {
+    let source: ISource = {
+      priority: 0,
+      enable: true,
+      name: 'source',
+      sourceType: SourceType.Service,
+      triggerCharacters: ['.'],
+      doComplete: (_opt: CompleteOption): Promise<CompleteResult> => {
+        return new Promise(resolve => {
+          setTimeout(() => {
+            resolve({ items: [{ word: 'foo' }, { word: 'bar' }] })
+          }, 60)
+        })
+      }
+    }
+    sources.addSource(source)
+    await helper.edit()
+    await nvim.input('i.')
+    await helper.wait(20)
+    await nvim.input('f')
+    await helper.waitPopup()
+    expect(completion.isActivted).toBe(true)
+    let items = await helper.items()
+    expect(items.length).toBe(1)
+    expect(items[0].word).toBe('foo')
+    sources.removeSource(source)
+  })
+
+  it('should filter slow source', async () => {
+    let source: ISource = {
+      priority: 0,
+      enable: true,
+      name: 'slow',
+      sourceType: SourceType.Service,
+      triggerCharacters: ['.'],
+      doComplete: (_opt: CompleteOption): Promise<CompleteResult> => {
+        return new Promise(resolve => {
+          setTimeout(() => {
+            resolve({ items: [{ word: 'foo' }, { word: 'bar' }] })
+          }, 600)
+        })
+      }
+    }
+    let disposable = sources.addSource(source)
+    await helper.edit()
+    await nvim.input('i.')
+    await helper.wait(60)
+    await nvim.input('f')
+    await helper.waitPopup()
+    await nvim.input('o')
+    await helper.wait(100)
+    expect(completion.isActivted).toBe(true)
+    let items = await helper.items()
+    expect(items.length).toBe(1)
+    expect(items[0].word).toBe('foo')
+    disposable.dispose()
+  })
+
+  it('should complete inComplete source', async () => {
+    let source: ISource = {
+      priority: 0,
+      enable: true,
+      name: 'inComplete',
+      sourceType: SourceType.Service,
+      triggerCharacters: ['.'],
+      doComplete: async (opt: CompleteOption): Promise<CompleteResult> => {
+        await helper.wait(30)
+        if (opt.input.length <= 1) {
+          return { isIncomplete: true, items: [{ word: 'foo' }, { word: opt.input }] }
+        }
+        return { isIncomplete: false, items: [{ word: 'foo' }, { word: opt.input }] }
+      }
+    }
+    let disposable = sources.addSource(source)
+    await helper.edit()
+    await nvim.input('i.')
+    await helper.waitPopup()
+    expect(completion.isActivted).toBe(true)
+    let items = await helper.items()
+    await nvim.input('a')
+    await helper.wait(10)
+    await nvim.input('b')
+    await helper.wait(100)
+    disposable.dispose()
+    items = await helper.items()
+    expect(items[0].word).toBe('ab')
+    await nvim.input('<esc>')
+  })
+
+  it('should not complete inComplete source when none word inserted', async () => {
+    let lastOption: CompleteOption
+    let source: ISource = {
+      priority: 0,
+      enable: true,
+      name: 'inComplete',
+      sourceType: SourceType.Service,
+      triggerCharacters: ['.'],
+      doComplete: async (opt: CompleteOption): Promise<CompleteResult> => {
+        lastOption = opt
+        await helper.wait(30)
+        if (opt.input.length <= 1) {
+          return { isIncomplete: true, items: [{ word: 'foo' }, { word: opt.input }] }
+        }
+        return { isIncomplete: false, items: [{ word: 'foo' }, { word: opt.input }] }
+      }
+    }
+    sources.addSource(source)
+    await helper.edit()
+    await nvim.input('i.')
+    await helper.waitPopup()
+    expect(completion.isActivted).toBe(true)
+    await nvim.input('a')
+    await helper.wait(10)
+    await nvim.input(',')
+    await helper.wait(300)
+    sources.removeSource(source)
+    expect(lastOption.triggerForInComplete).toBeFalsy()
+    await nvim.input('<esc>')
   })
 })
 
@@ -313,65 +355,6 @@ describe('completion#TextChangedP', () => {
     disposable.dispose()
   })
 
-  it('should trigger complete on trigger patterns match', async () => {
-    let source: ISource = {
-      priority: 99,
-      enable: true,
-      name: 'temp',
-      triggerPatterns: [/EM/],
-      sourceType: SourceType.Service,
-      doComplete: (opt: CompleteOption): Promise<CompleteResult> => {
-        if (!opt.input.startsWith('EM')) return null
-        return Promise.resolve({
-          items: [
-            { word: 'a', filterText: 'EMa' },
-            { word: 'b', filterText: 'EMb' }
-          ]
-        })
-      },
-    }
-    let disposable = sources.addSource(source)
-    await nvim.input('i')
-    await helper.wait(10)
-    await nvim.input('E')
-    await helper.wait(10)
-    await nvim.input('M')
-    await helper.waitPopup()
-    let items = await helper.getItems()
-    expect(items.length).toBe(2)
-    disposable.dispose()
-  })
-
-  it('should trigger complete when pumvisible', async () => {
-    await nvim.setLine('EnumMember')
-    let source: ISource = {
-      priority: 99,
-      enable: true,
-      name: 'temp',
-      triggerPatterns: [/EM/],
-      sourceType: SourceType.Service,
-      doComplete: (opt: CompleteOption): Promise<CompleteResult> => {
-        if (!opt.input.startsWith('EM')) return null
-        return Promise.resolve({
-          items: [
-            { word: 'a', filterText: 'EMa' },
-            { word: 'b', filterText: 'EMb' }
-          ]
-        })
-      },
-    }
-    let disposable = sources.addSource(source)
-    await nvim.input('o')
-    await helper.wait(10)
-    await nvim.input('E')
-    await helper.waitPopup()
-    await nvim.input('M')
-    await helper.waitPopup()
-    let items = await helper.getItems()
-    expect(items.length).toBeGreaterThan(2)
-    disposable.dispose()
-  })
-
   it('should do resolve for complete item', async () => {
     let source: ISource = {
       priority: 0,
@@ -398,7 +381,7 @@ describe('completion#TextChangedP', () => {
   })
 })
 
-describe('completion#CompleteDone', () => {
+describe('completion done', () => {
   it('should fix word on CompleteDone', async () => {
     await nvim.setLine('fball football')
     await nvim.input('i')
@@ -414,7 +397,9 @@ describe('completion#CompleteDone', () => {
     let line = await nvim.line
     expect(line).toBe('football football')
   })
+})
 
+describe('completion option', () => {
   it('should hide kind and menu when configured', async () => {
     helper.updateConfiguration('suggest.disableKind', true)
     helper.updateConfiguration('suggest.disableMenu', true)
@@ -429,8 +414,8 @@ describe('completion#CompleteDone', () => {
   })
 })
 
-describe('completion#TextChangedI', () => {
-  it('should respect commitCharacter', async () => {
+describe('completion resume', () => {
+  it('should respect commitCharacter on TextChangedI', async () => {
     let source: ISource = {
       priority: 0,
       enable: true,
@@ -455,8 +440,33 @@ describe('completion#TextChangedI', () => {
     await helper.wait(100)
     sources.removeSource(source)
   })
+})
 
-  it('should trigger completion when possible', async () => {
+describe('completion trigger', () => {
+  it('should trigger completion on CursorMovedI', async () => {
+    let source: ISource = {
+      priority: 0,
+      enable: true,
+      name: 'trigger',
+      sourceType: SourceType.Service,
+      triggerCharacters: ['>'],
+      doComplete: async (opt: CompleteOption): Promise<CompleteResult> => {
+        if (opt.triggerCharacter == '>') {
+          return { items: [{ word: 'foo' }] }
+        }
+        return null
+      }
+    }
+    let disposable = sources.addSource(source)
+    await helper.edit()
+    await nvim.input('i><esc>a')
+    await helper.waitPopup()
+    let items = await helper.getItems()
+    expect(items.length).toBe(1)
+    disposable.dispose()
+  })
+
+  it('should trigger completion on type trigger character', async () => {
     let source: ISource = {
       priority: 1,
       enable: true,
@@ -474,16 +484,11 @@ describe('completion#TextChangedI', () => {
     await nvim.input('i')
     await helper.wait(30)
     await nvim.input('.')
-    await helper.pumvisible()
-    await helper.wait(80)
-    expect(completion.isActivted).toBe(true)
+    await helper.waitPopup()
     let items = await helper.items()
     expect(items.length).toBeGreaterThan(0)
     sources.removeSource(source)
   })
-})
-
-describe('completion#shouldTrigger', () => {
 
   it('should not trigger if autoTrigger is none', async () => {
     let config = workspace.getConfiguration('suggest')
@@ -496,6 +501,62 @@ describe('completion#shouldTrigger', () => {
     expect(completion.isActivted).toBe(false)
     config.update('autoTrigger', 'always')
     await helper.wait(100)
+  })
+
+  it('should trigger complete on trigger patterns match', async () => {
+    let source: ISource = {
+      priority: 99,
+      enable: true,
+      name: 'temp',
+      triggerPatterns: [/EM/],
+      sourceType: SourceType.Service,
+      doComplete: (opt: CompleteOption): Promise<CompleteResult> => {
+        if (!opt.input.startsWith('EM')) return null
+        return Promise.resolve({
+          items: [
+            { word: 'foo', filterText: 'EMfoo' },
+            { word: 'bar', filterText: 'EMbar' }
+          ]
+        })
+      },
+    }
+    let disposable = sources.addSource(source)
+    await nvim.input('i')
+    await nvim.input('EM')
+    await helper.waitPopup()
+    let items = await helper.getItems()
+    expect(items.length).toBe(2)
+    disposable.dispose()
+  })
+
+  it('should trigger complete when pumvisible and triggerPatterns match', async () => {
+    await nvim.setLine('EnumMember')
+    let source: ISource = {
+      priority: 99,
+      enable: true,
+      name: 'temp',
+      triggerPatterns: [/EM/],
+      sourceType: SourceType.Service,
+      doComplete: (opt: CompleteOption): Promise<CompleteResult> => {
+        if (!opt.input.startsWith('EM')) return null
+        return Promise.resolve({
+          items: [
+            { word: 'a', filterText: 'EMa' },
+            { word: 'b', filterText: 'EMb' }
+          ]
+        })
+      },
+    }
+    let disposable = sources.addSource(source)
+    await nvim.input('o')
+    await helper.wait(10)
+    await nvim.input('E')
+    await helper.waitPopup()
+    await nvim.input('M')
+    await helper.waitPopup()
+    let items = await helper.getItems()
+    expect(items.length).toBe(3)
+    disposable.dispose()
   })
 })
 

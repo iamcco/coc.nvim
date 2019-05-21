@@ -59,6 +59,14 @@
             "type": "string"
           }
         },
+        "additionalSchemes": {
+          "type": "array",
+          "default": [],
+          "description": "Additional uri schemes, default schemes including file & untitled.",
+          "items": {
+            "type": "string"
+          }
+        },
         "revealOutputChannelOn": {
           "type": "string",
           "default": "never",
@@ -104,6 +112,7 @@
         "requireRootPattern": {},
         "ignoredRootPaths": {},
         "filetypes": {},
+        "additionalSchemes": {},
         "revealOutputChannelOn": {},
         "initializationOptions": {},
         "settings": {},
@@ -161,6 +170,7 @@
         "requireRootPattern": {},
         "ignoredRootPaths": {},
         "filetypes": {},
+        "additionalSchemes": {},
         "revealOutputChannelOn": {},
         "initializationOptions": {},
         "stdioEncoding": {},
@@ -205,6 +215,7 @@
         "requireRootPattern": {},
         "ignoredRootPaths": {},
         "filetypes": {},
+        "additionalSchemes": {},
         "revealOutputChannelOn": {},
         "initializationOptions": {},
         "stdioEncoding": {},
@@ -217,7 +228,7 @@
     "http.proxy": {
       "type": "string",
       "default": "",
-      "description": "http proxy used for json server"
+      "description": "http proxy uri, used for extensions that send request"
     },
     "http.proxyStrictSSL": {
       "type": "boolean",
@@ -390,6 +401,11 @@
       },
       "additionalProperties": false
     },
+    "diagnostic.enable": {
+      "type": "boolean",
+      "description": "Set to false to disable diagnostic display",
+      "default": true
+    },
     "diagnostic.level": {
       "type": "string",
       "description": "Used for filter diagnostics by diagnostic severity.",
@@ -421,11 +437,6 @@
       "type": "boolean",
       "description": "Only refresh diagnostics after save, default false.",
       "default": false
-    },
-    "diagnostic.enable": {
-      "type": "boolean",
-      "description": "Set to false to disable diagnostic display",
-      "default": true
     },
     "diagnostic.displayByAle": {
       "type": "boolean",
@@ -573,13 +584,18 @@
     },
     "list.limitLines": {
       "type": "number",
-      "default": 1000,
+      "default": 30000,
       "description": "Limit lines for list buffer."
     },
     "list.maxPreviewHeight": {
       "type": "number",
       "default": 12,
       "description": "Max height for preview window of list."
+    },
+    "list.previewSplitRight": {
+      "type": "boolean",
+      "default": false,
+      "description": "Use vsplit for preview window."
     },
     "list.previewHighlightGroup": {
       "type": "string",
@@ -630,16 +646,6 @@
     "coc.preferences.colorSupport": {
       "type": "boolean",
       "description": "Enable color highlight if language server support it.",
-      "default": true
-    },
-    "coc.preferences.parseKeywordsLimitLines": {
-      "type": "number",
-      "description": "Limit the lines of buffer for parse keywords on change.",
-      "default": 30000
-    },
-    "coc.preferences.hyphenAsKeyword": {
-      "type": "boolean",
-      "description": "Always consider `-` as keyword character when parsing buffer for keywords.",
       "default": true
     },
     "coc.preferences.previewAutoClose": {
