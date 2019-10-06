@@ -2,7 +2,7 @@ import { Neovim } from '@chemzqm/neovim'
 import fs from 'fs'
 import readline from 'readline'
 import { CancellationToken, Position, Disposable, Location, Range } from 'vscode-languageserver-protocol'
-import { default as URI, default as Uri } from 'vscode-uri'
+import { URI } from 'vscode-uri'
 import { ProviderResult } from '../provider'
 import { IList, ListAction, ListContext, ListItem, ListTask, LocationWithLine, WorkspaceConfiguration, ListArgument, PreiewOptions } from '../types'
 import { disposeAll } from '../util'
@@ -115,7 +115,8 @@ export default abstract class BasicList implements IList, Disposable {
           })
         }))
         await nvim.call('setqflist', [quickfixItems])
-        nvim.command('copen', true)
+        let openCommand = await nvim.getVar('coc_quickfix_open_command') as string
+        nvim.command(typeof openCommand === 'string' ? openCommand : 'copen', true)
       }
     })
     for (let name of ['open', 'tabe', 'drop', 'vsplit', 'split']) {
@@ -131,7 +132,7 @@ export default abstract class BasicList implements IList, Disposable {
   public async convertLocation(location: Location | LocationWithLine | string): Promise<Location> {
     if (typeof location == 'string') return Location.create(location, Range.create(0, 0, 0, 0))
     if (Location.is(location)) return location
-    let u = Uri.parse(location.uri)
+    let u = URI.parse(location.uri)
     if (u.scheme != 'file') return Location.create(location.uri, Range.create(0, 0, 0, 0))
     const rl = readline.createInterface({
       input: fs.createReadStream(u.fsPath, { encoding: 'utf8' }),
@@ -195,6 +196,7 @@ export default abstract class BasicList implements IList, Disposable {
     if (doc) lineCount = doc.lineCount
     let height = Math.min(this.previewHeight, lineCount)
     let u = URI.parse(uri)
+    // handle different scheme
     if (u.scheme == 'untitled' || u.scheme == 'unknown') {
       let bufnr = parseInt(u.path, 10)
       let valid = await nvim.call('bufloaded', [bufnr])
@@ -204,30 +206,41 @@ export default abstract class BasicList implements IList, Disposable {
         name = name || '[No Name]'
         let filetype = await nvim.call('getbufvar', [bufnr, '&filetype'])
         let lines = await nvim.call('getbufline', [bufnr, 1, '$'])
-        await this.preview({ bufname: name, sketch: true, filetype, lnum, lines }, context)
+        await this.preview({ bufname: name, sketch: true, filetype: filetype || 'txt', lnum, lines }, context)
       } else {
-        await this.preview({ bufname: '[No Name]', sketch: true, filetype: 'txt', lines: [] }, context)
+        await this.preview({ sketch: true, filetype: 'txt', lines: [] }, context)
       }
       return
     }
+    // check
     let filepath = u.scheme == 'file' ? u.fsPath : u.toString()
-    let escaped = await nvim.call('fnameescape', filepath)
+    nvim.pauseNotification()
+    nvim.call('fnameescape', filepath, true)
+    nvim.call('bufloaded', filepath, true)
+    nvim.call('eval', `!empty(getwininfo(${context.window.id}))`, true)
+    let [res, error] = await nvim.resumeNotification()
+    if (error) {
+      logger.error(error)
+      return
+    }
+    // open previewwindow
+    let { position } = context.options
+    let [escaped, exists, valid] = res
     let lnum = range.start.line + 1
-    let mod = context.options.position == 'top' ? 'below' : 'above'
     let winid = context.listWindow.id
-    let exists = await nvim.call('bufloaded', filepath)
-    let valid = await context.window.valid
     nvim.pauseNotification()
     nvim.command('pclose', true)
-    if (this.splitRight) {
-      if (valid) nvim.call('win_gotoid', [context.window.id], true)
-      nvim.command(`belowright vs +setl\\ previewwindow ${escaped}`, true)
+    if (this.splitRight || position == 'tab') {
+      if (valid && this.splitRight) nvim.call('win_gotoid', [context.window.id], true)
+      nvim.command(`silent belowright vs +setl\\ previewwindow ${escaped}`, true)
     } else {
-      nvim.command(`${mod} ${height}sp +setl\\ previewwindow ${escaped}`, true)
+      let mod = context.options.position == 'top' ? 'below' : 'above'
+      nvim.command(`silent ${mod} ${height}sp +setl\\ previewwindow ${escaped}`, true)
+      nvim.command(`exe "normal! z${height}\\<cr>"`, true)
     }
     nvim.command(`exe ${lnum}`, true)
-    nvim.command('setl winfixheight', true)
-    nvim.command('setl nofoldenable', true)
+    nvim.command('setl winfixheight nofoldenable', true)
+    // highlight range
     if (comparePosition(range.start, range.end) !== 0) {
       let arr: Range[] = []
       for (let i = range.start.line; i <= range.end.line; i++) {
@@ -247,39 +260,62 @@ export default abstract class BasicList implements IList, Disposable {
     if (!exists) nvim.command('setl nobuflisted bufhidden=wipe', true)
     nvim.command('normal! zz', true)
     nvim.call('win_gotoid', [winid], true)
-    await nvim.resumeNotification()
+    if (workspace.isVim) nvim.command('redraw', true)
+    let [, err] = await nvim.resumeNotification()
+    // tslint:disable-next-line: no-console
+    if (err) console.error(`Error on ${err[0]}: ${err[1]} - ${err[2]}`)
   }
 
   public async preview(options: PreiewOptions, context: ListContext): Promise<void> {
     let { nvim } = this
     let { bufname, filetype, sketch, lines, lnum } = options
+    if (!bufname) sketch = true
     let mod = context.options.position == 'top' ? 'below' : 'above'
     let height = Math.min(this.previewHeight, lines ? Math.max(lines.length, 1) : Infinity)
     let winid = context.listWindow.id
     let valid = await context.window.valid
     nvim.pauseNotification()
     nvim.command('pclose', true)
-    if (this.splitRight) {
-      if (valid) nvim.call('win_gotoid', [context.window.id], true)
-      nvim.command(`belowright vs +setl\\ previewwindow ${bufname}`, true)
+    if (this.splitRight || context.options.position == 'tab') {
+      if (valid && this.splitRight) nvim.call('win_gotoid', [context.window.id], true)
+      if (bufname) {
+        nvim.command(`silent belowright vs +setl\\ previewwindow ${bufname}`, true)
+      } else {
+        nvim.command(`silent belowright vnew +setl\\ previewwindow`, true)
+      }
     } else {
-      nvim.command(`${mod} ${height}sp +setl\\ previewwindow ${bufname}`, true)
+      if (bufname) {
+        nvim.command(`silent ${mod} ${height}sp +setl\\ previewwindow ${bufname}`, true)
+      } else {
+        nvim.command(`silent ${mod} ${height}new +setl\\ previewwindow`, true)
+      }
+      nvim.command(`exe "normal! z${height}\\<cr>"`, true)
     }
-    if (lines) {
+    if (lines && lines.length) {
       nvim.call('append', [0, lines], true)
       nvim.command('normal! Gdd', true)
     }
-    if (lnum) nvim.command(`exe ${lnum}`, true)
+    nvim.command(`exe ${lnum || 1}`, true)
     nvim.command('setl winfixheight nomodifiable', true)
     if (sketch) nvim.command('setl buftype=nofile bufhidden=wipe nobuflisted', true)
     if (filetype == 'detect') {
       nvim.command('filetype detect', true)
-    } else {
+    } else if (filetype) {
       nvim.command(`setf ${filetype}`, true)
     }
-    nvim.command('normal! zz', true)
+    if (lnum && lnum != 1) nvim.command('normal! zz', true)
     nvim.call('win_gotoid', [winid], true)
-    await nvim.resumeNotification()
+    if (workspace.isVim) nvim.command('redraw', true)
+    let [, err] = await nvim.resumeNotification()
+    // tslint:disable-next-line: no-console
+    if (err) console.error(`Error on ${err[0]}: ${err[1]} - ${err[2]}`)
+  }
+
+  protected getPreviewCommand(context: ListContext): string {
+    let { position } = context.options
+    if (position == 'tab') return `belowright vs`
+    let mod = position == 'top' ? 'below' : 'above'
+    return `${mod} ${this.previewHeight}sp`
   }
 
   public abstract loadItems(context: ListContext, token?: CancellationToken): Promise<ListItem[] | ListTask | null | undefined>

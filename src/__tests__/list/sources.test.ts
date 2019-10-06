@@ -1,6 +1,7 @@
 import { Neovim } from '@chemzqm/neovim'
 import { BasicList, ListContext, ListItem, ListArgument } from '../..'
 import manager from '../../list/manager'
+import languages from '../../languages'
 import helper from '../helper'
 import workspace from '../../workspace'
 import { CancellationToken } from 'vscode-jsonrpc'
@@ -84,8 +85,6 @@ describe('BasicList', () => {
       let win = await nvim.window
       let isPreview = await win.getOption('previewwindow')
       expect(isPreview).toBe(true)
-      let bufname = await nvim.call('bufname', '%')
-      expect(bufname).toBe('[No Name]')
       let line = await nvim.line
       expect(line).toBe('foo')
       disposable.dispose()
@@ -142,15 +141,6 @@ describe('list sources', () => {
     })
   })
 
-  describe('links', () => {
-    it('should load links source', async () => {
-      await manager.start(['links'])
-      await manager.ui.ready
-      await helper.wait(100)
-      expect(manager.isActivated).toBe(true)
-    })
-  })
-
   describe('lists', () => {
     it('should load lists source', async () => {
       await manager.start(['lists'])
@@ -198,10 +188,31 @@ describe('list sources', () => {
 
   describe('symbols', () => {
     it('should load symbols source', async () => {
+      let disposable = languages.registerWorkspaceSymbolProvider([{ scheme: 'file' }, { scheme: 'untitled' }], {
+        provideWorkspaceSymbols: () => {
+          return []
+        }
+      })
       await manager.start(['symbols'])
       await manager.ui.ready
       await helper.wait(100)
       expect(manager.isActivated).toBe(true)
+      disposable.dispose()
+    })
+  })
+
+  describe('links', () => {
+    it('should load links source', async () => {
+      let disposable = languages.registerDocumentLinkProvider([{ scheme: 'file' }, { scheme: 'untitled' }], {
+        provideDocumentLinks: () => {
+          return []
+        }
+      })
+      await manager.start(['links'])
+      await manager.ui.ready
+      await helper.wait(100)
+      expect(manager.isActivated).toBe(true)
+      disposable.dispose()
     })
   })
 })

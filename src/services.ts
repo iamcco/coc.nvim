@@ -35,7 +35,7 @@ export function getStateName(state: ServiceStat): string {
 }
 
 export class ServiceManager extends EventEmitter implements Disposable {
-  private readonly registed: Map<string, IServiceProvider> = new Map()
+  private readonly registered: Map<string, IServiceProvider> = new Map()
   private disposables: Disposable[] = []
 
   public init(): void {
@@ -53,7 +53,7 @@ export class ServiceManager extends EventEmitter implements Disposable {
   public dispose(): void {
     this.removeAllListeners()
     disposeAll(this.disposables)
-    for (let service of this.registed.values()) {
+    for (let service of this.registered.values()) {
       service.dispose()
     }
   }
@@ -61,9 +61,9 @@ export class ServiceManager extends EventEmitter implements Disposable {
   public regist(service: IServiceProvider): Disposable {
     let { id } = service
     if (!id) logger.error('invalid service configuration. ', service.name)
-    if (this.registed.get(id)) return
-    this.registed.set(id, service)
-    logger.info(`registed service "${id}"`)
+    if (this.registered.get(id)) return
+    this.registered.set(id, service)
+    logger.info(`registered service "${id}"`)
     if (this.shouldStart(service)) {
       service.start() // tslint:disable-line
     }
@@ -77,18 +77,18 @@ export class ServiceManager extends EventEmitter implements Disposable {
     return Disposable.create(() => {
       service.stop()
       service.dispose()
-      this.registed.delete(id)
+      this.registered.delete(id)
     })
   }
 
   public getService(id: string): IServiceProvider {
-    let service = this.registed.get(id)
-    if (!service) service = this.registed.get(`languageserver.${id}`)
+    let service = this.registered.get(id)
+    if (!service) service = this.registered.get(`languageserver.${id}`)
     return service
   }
 
   private hasService(id: string): boolean {
-    return this.registed.has(id)
+    return this.registered.has(id)
   }
 
   private shouldStart(service: IServiceProvider): boolean {
@@ -115,7 +115,7 @@ export class ServiceManager extends EventEmitter implements Disposable {
 
   public getServices(document: TextDocument): IServiceProvider[] {
     let res: IServiceProvider[] = []
-    for (let service of this.registed.values()) {
+    for (let service of this.registered.values()) {
       if (workspace.match(service.selector, document) > 0) {
         res.push(service)
       }
@@ -124,7 +124,7 @@ export class ServiceManager extends EventEmitter implements Disposable {
   }
 
   public stop(id: string): Promise<void> {
-    let service = this.registed.get(id)
+    let service = this.registered.get(id)
     if (!service) {
       workspace.showMessage(`Service ${id} not found`, 'error')
       return
@@ -133,13 +133,13 @@ export class ServiceManager extends EventEmitter implements Disposable {
   }
 
   public async stopAll(): Promise<void> {
-    for (let service of this.registed.values()) {
+    for (let service of this.registered.values()) {
       await Promise.resolve(service.stop())
     }
   }
 
   public async toggle(id: string): Promise<void> {
-    let service = this.registed.get(id)
+    let service = this.registered.get(id)
     if (!service) {
       workspace.showMessage(`Service ${id} not found`, 'error')
       return
@@ -160,7 +160,7 @@ export class ServiceManager extends EventEmitter implements Disposable {
 
   public getServiceStats(): ServiceInfo[] {
     let res: ServiceInfo[] = []
-    for (let [id, service] of this.registed) {
+    for (let [id, service] of this.registered) {
       res.push({
         id,
         languageIds: documentSelectorToLanguageIds(service.selector),
@@ -174,7 +174,7 @@ export class ServiceManager extends EventEmitter implements Disposable {
     let base = 'languageserver'
     let lspConfig = workspace.getConfiguration().get<{ string: LanguageServerConfig }>(base, {} as any)
     for (let key of Object.keys(lspConfig)) {
-      if (this.registed.get(key)) continue
+      if (this.registered.get(key)) continue
       let config: LanguageServerConfig = lspConfig[key]
       let id = `${base}.${key}`
       if (config.enable === false || this.hasService(id)) continue
@@ -183,6 +183,38 @@ export class ServiceManager extends EventEmitter implements Disposable {
       let client = new LanguageClient(id, key, opts[1], opts[0])
       this.registLanguageClient(client)
     }
+  }
+
+  private waitClient(id: string): Promise<void> {
+    let service = this.getService(id)
+    if (service && service.state == ServiceStat.Running) return Promise.resolve()
+    if (service) return new Promise(resolve => {
+      service.onServiceReady(() => {
+        resolve()
+      })
+    })
+    return new Promise(resolve => {
+      let listener = clientId => {
+        if (clientId == id || clientId == `languageserver.${id}`) {
+          this.off('ready', listener)
+          resolve()
+        }
+      }
+      this.on('ready', listener)
+    })
+  }
+
+  public async registNotification(id: string, method: string): Promise<void> {
+    await this.waitClient(id)
+    let service = this.getService(id)
+    if (!service.client) {
+      workspace.showMessage(`Not a language client: ${id}`, 'error')
+      return
+    }
+    let client = service.client as LanguageClient
+    client.onNotification(method, async result => {
+      await workspace.nvim.call('coc#do_notify', [id, method, result])
+    })
   }
 
   public async sendRequest(id: string, method: string, params?: any): Promise<any> {
@@ -348,6 +380,9 @@ export function getLanguageServerOptions(id: string, name: string, config: Langu
   let clientOptions: LanguageClientOptions = {
     ignoredRootPaths,
     disableWorkspaceFolders,
+    disableDynamicRegister: !!config.disableDynamicRegister,
+    disableCompletion: !!config.disableCompletion,
+    disableDiagnostics: !!config.disableDiagnostics,
     documentSelector,
     revealOutputChannelOn: getRevealOutputChannelOn(config.revealOutputChannelOn),
     synchronize: {

@@ -1,6 +1,6 @@
 import path from 'path'
 import { DocumentSymbol, Location, Range, SymbolInformation } from 'vscode-languageserver-types'
-import Uri from 'vscode-uri'
+import { URI } from 'vscode-uri'
 import languages from '../../languages'
 import Document from '../../model/document'
 import { ListContext, ListItem } from '../../types'
@@ -34,11 +34,10 @@ export default class Outline extends LocationList {
         symbols.sort(sortSymbols)
         for (let s of symbols) {
           let kind = getSymbolKind(s.kind)
-          if (kind == 'Variable') continue
           let location = Location.create(document.uri, s.selectionRange)
           items.push({
-            label: `${' '.repeat(level * 2)}${s.name} [${kind}] ${s.range.start.line + 1}`,
-            filterText: `${s.name}`,
+            label: `${' '.repeat(level * 2)}${s.name}\t[${kind}]\t${s.range.start.line + 1}`,
+            filterText: s.name,
             location
           })
           if (s.children && s.children.length) {
@@ -56,6 +55,7 @@ export default class Outline extends LocationList {
       })
       for (let s of symbols as SymbolInformation[]) {
         let kind = getSymbolKind(s.kind)
+        if (s.name.endsWith(') callback')) continue
         items.push({
           label: `${s.name} [${kind}] ${s.location.range.start.line + 1}`,
           filterText: `${s.name}`,
@@ -69,7 +69,7 @@ export default class Outline extends LocationList {
   public doHighlight(): void {
     let { nvim } = this
     nvim.pauseNotification()
-    nvim.command('syntax match CocOutlineName /\\v^\\s*\\S+/ contained containedin=CocOutlineLine', true)
+    nvim.command('syntax match CocOutlineName /\\v^\\s*[^\t]+/ contained containedin=CocOutlineLine', true)
     nvim.command('syntax match CocOutlineKind /\\[\\w\\+\\]/ contained containedin=CocOutlineLine', true)
     nvim.command('syntax match CocOutlineLine /\\d\\+$/ contained containedin=CocOutlineLine', true)
     nvim.command('highlight default link CocOutlineName Normal', true)
@@ -81,7 +81,7 @@ export default class Outline extends LocationList {
   }
 
   public async loadCtagsSymbols(document: Document): Promise<ListItem[]> {
-    let uri = Uri.parse(document.uri)
+    let uri = URI.parse(document.uri)
     let extname = path.extname(uri.fsPath)
     let content = ''
     let tempname = await this.nvim.call('tempname')

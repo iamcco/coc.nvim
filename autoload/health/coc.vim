@@ -11,14 +11,9 @@ function! s:checkEnvironment() abort
     let valid = 0
     call health#report_error('Executable node.js not found, install node.js from http://nodejs.org/')
   endif
-  let yarncmd = coc#util#yarn_cmd()
-  if empty(yarncmd)
-    call health#report_warn('Environment executable yarnpkg & yarn not found, check https://yarnpkg.com/en/docs/install for installation.')
-    call health#report_info('yarn is required for install extensions.')
-  endif
   let output = system(node . ' --version')
   if v:shell_error && output !=# ""
-    echohl Error | echon output | echohl None
+    echohl Error | echom output | echohl None
     return
   endif
   let ms = matchlist(output, 'v\(\d\+\).\(\d\+\).\(\d\+\)')

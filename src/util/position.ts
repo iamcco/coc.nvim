@@ -4,14 +4,23 @@ export function rangeInRange(r: Range, range: Range): boolean {
   return positionInRange(r.start, range) === 0 && positionInRange(r.end, range) === 0
 }
 
+/**
+ * Check if two ranges have overlap character.
+ */
 export function rangeOverlap(r: Range, range: Range): boolean {
   let { start, end } = r
-  if (comparePosition(start, range.start) < 0 && comparePosition(end, range.end) > 0) {
-    return true
+  if (comparePosition(end, range.start) <= 0) {
+    return false
   }
-  return positionInRange(start, range) == 0 || positionInRange(end, range) == 0
+  if (comparePosition(start, range.end) >= 0) {
+    return false
+  }
+  return true
 }
 
+/**
+ * Check if two ranges have overlap or nested
+ */
 export function rangeIntersect(r: Range, range: Range): boolean {
   if (positionInRange(r.start, range) == 0) {
     return true
@@ -111,4 +120,13 @@ export function editRange(range: Range, text: string, edit: TextEdit): string {
   character = end.line == range.start.line ? end.character - range.start.character : end.character
   let endOffset = positionToOffset(lines, end.line - range.start.line, character)
   return `${text.slice(0, startOffset)}${edit.newText}${text.slice(endOffset, text.length)}`
+}
+
+export function getChangedFromEdits(start: Position, edits: TextEdit[]): Position | null {
+  let changed = { line: 0, character: 0 }
+  for (let edit of edits) {
+    let d = getChangedPosition(start, edit)
+    changed = { line: changed.line + d.line, character: changed.character + d.character }
+  }
+  return changed.line == 0 && changed.character == 0 ? null : changed
 }

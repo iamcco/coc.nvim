@@ -59,7 +59,7 @@ export default class Complete {
     return this.results.findIndex(o => o.isIncomplete == true) !== -1
   }
 
-  private async completeSource(source: ISource, completeInComplete = false): Promise<void> {
+  private async completeSource(source: ISource): Promise<void> {
     let { col } = this.option
     // new option for each source
     let opt = Object.assign({}, this.option)
@@ -113,20 +113,19 @@ export default class Complete {
           let dt = Date.now() - start
           logger.debug(`Source "${name}" takes ${dt}ms`)
           if (result && result.items && result.items.length) {
-            if (result.startcol != null && result.startcol != col) {
-              result.engross = true
-            }
             result.priority = source.priority
             result.source = name
-            result.completeInComplete = completeInComplete
             // lazy completed items
-            if (result.engross && empty) {
+            if (empty && result.startcol && result.startcol != col) {
               this.results = [result]
             } else {
               let { results } = this
               let idx = results.findIndex(o => o.source == name)
-              if (idx != -1) results.splice(idx, 1)
-              this.results.push(result)
+              if (idx != -1) {
+                results.splice(idx, 1, result)
+              } else {
+                results.push(result)
+              }
             }
             if (empty) this._onDidComplete.fire()
             resolve()
@@ -147,7 +146,7 @@ export default class Complete {
 
   public async completeInComplete(resumeInput: string): Promise<VimCompleteItem[]> {
     let { results, document } = this
-    let remains = results.filter(res => !res.isIncomplete)
+    let remains = results.filter(res => res.isIncomplete != true)
     remains.forEach(res => {
       res.items.forEach(item => delete item.user_data)
     })
@@ -162,24 +161,20 @@ export default class Complete {
       triggerForInComplete: true
     })
     let sources = this.sources.filter(s => names.indexOf(s.name) !== -1)
-    await Promise.all(sources.map(s => this.completeSource(s, true)))
+    await Promise.all(sources.map(s => this.completeSource(s)))
     return this.filterResults(resumeInput, Math.floor(Date.now() / 1000))
-  }
-
-  public excludeResults(names: string[]): CompleteResult[] {
-    let { results } = this
-    if (!results) return []
-    let arr = this.results.filter(o => names.indexOf(o.source) == -1)
-    arr.forEach(o => o.engross = false)
-    return arr
   }
 
   public filterResults(input: string, cid = 0): VimCompleteItem[] {
     let { results } = this
-    results.sort((a, b) => b.priority - a.priority)
+    results.sort((a, b) => {
+      if (a.source == 'tabnine') return 1
+      if (b.source == 'tabnine') return -1
+      return b.priority - a.priority
+    })
     let now = Date.now()
     let { bufnr } = this.option
-    let { snippetIndicator, fixInsertedWord } = this.config
+    let { snippetIndicator, removeDuplicateItems, fixInsertedWord } = this.config
     let followPart = (!fixInsertedWord || cid == 0) ? '' : this.getFollowPart()
     if (results.length == 0) return []
     // max score of high priority source
@@ -187,8 +182,6 @@ export default class Complete {
     let arr: VimCompleteItem[] = []
     let codes = getCharCodes(input)
     let words: Set<string> = new Set()
-    let filtering = input.length > this.input.length
-    let preselect: VimCompleteItem = null
     for (let i = 0, l = results.length; i < l; i++) {
       let res = results[i]
       let { items, source, priority } = res
@@ -196,11 +189,12 @@ export default class Complete {
       for (let idx = 0; idx < items.length; idx++) {
         let item = items[idx]
         let { word } = item
-        if (!item.dup && words.has(word)) continue
+        if ((!item.dup || source == 'tabnine') && words.has(word)) continue
+        if (removeDuplicateItems && !item.isSnippet && words.has(word)) continue
         let filterText = item.filterText || item.word
         item.filterText = filterText
         if (filterText.length < input.length) continue
-        let score = matchScore(filterText, codes)
+        let score = item.kind && filterText == input ? 64 : matchScore(filterText, codes)
         if (input.length && score == 0) continue
         if (priority > 90) maxScore = Math.max(maxScore, score)
         if (maxScore > 5 && priority <= 10 && score < maxScore) continue
@@ -223,26 +217,22 @@ export default class Complete {
           if (item.signature) user_data.signature = item.signature
           item.user_data = JSON.stringify(user_data)
           item.source = source
-        }
-        item.priority = priority
-        item.score = input.length ? score : 0
-        item.localBonus = this.localBonus ? this.localBonus.get(filterText) || 0 : 0
-        item.recentScore = item.recentScore || 0
-        if (!item.recentScore) {
           let recentScore = this.recentScores[`${bufnr}|${word}`]
           if (recentScore && now - recentScore < 60 * 1000) {
             item.recentScore = recentScore
+          } else {
+            item.recentScore = 0
           }
+        } else {
+          delete item.sortText
         }
+        item.priority = priority
+        item.abbr = item.abbr || item.word
+        item.score = input.length ? score : 0
+        item.localBonus = this.localBonus ? this.localBonus.get(filterText) || 0 : 0
         words.add(word)
-        if (!preselect) {
-          if (item.isSnippet && item.word == input) {
-            preselect = item
-            continue
-          } else if (!filtering && item.preselect) {
-            preselect = item
-            continue
-          }
+        if (item.isSnippet && item.word == input) {
+          item.preselect = true
         }
         arr.push(item)
       }
@@ -254,16 +244,18 @@ export default class Complete {
       let wb = b.filterText
       if (a.score != b.score) return b.score - a.score
       if (a.priority != b.priority) return b.priority - a.priority
-      if (wa.startsWith(wb)) return 1
-      if (wb.startsWith(wa)) return -1
       if (sa && sb && sa != sb) return sa < sb ? -1 : 1
       if (a.recentScore != b.recentScore) return b.recentScore - a.recentScore
-      if (a.localBonus != b.localBonus) return b.localBonus - a.localBonus
+      if (a.localBonus != b.localBonus) {
+        if (a.localBonus && b.localBonus && wa != wb) {
+          if (wa.startsWith(wb)) return 1
+          if (wb.startsWith(wa)) return -1
+        }
+        return b.localBonus - a.localBonus
+      }
       return a.filterText.length - b.filterText.length
     })
-    let items = arr.slice(0, this.config.maxItemCount)
-    if (preselect) items.unshift(preselect)
-    return this.limitCompleteItems(items)
+    return this.limitCompleteItems(arr.slice(0, this.config.maxItemCount))
   }
 
   private limitCompleteItems(items: VimCompleteItem[]): VimCompleteItem[] {
@@ -297,9 +289,9 @@ export default class Complete {
     return false
   }
 
-  public async doComplete(preserved?: CompleteResult[]): Promise<VimCompleteItem[]> {
+  public async doComplete(): Promise<VimCompleteItem[]> {
     let opts = this.option
-    let { line, colnr, linenr } = this.option
+    let { line, colnr, linenr, col } = this.option
     if (this.config.localityBonus) {
       let line = linenr - 1
       this.localBonus = this.document.getLocalifyBonus(Position.create(line, opts.col - 1), Position.create(line, colnr))
@@ -308,17 +300,12 @@ export default class Complete {
     }
     await Promise.all(this.sources.map(s => this.completeSource(s)))
     let { results } = this
-    if (preserved && preserved.length) {
-      results = this.results = results.concat(preserved)
-    }
     if (results.length == 0) return []
-    let engrossResult = results.find(r => r.engross === true)
+    let engrossResult = results.find(r => r.startcol != null && r.startcol != col)
     if (engrossResult) {
       let { startcol } = engrossResult
-      if (startcol != null) {
-        opts.col = startcol
-        opts.input = byteSlice(line, startcol, colnr - 1)
-      }
+      opts.col = startcol
+      opts.input = byteSlice(line, startcol, colnr - 1)
       this.results = [engrossResult]
     }
     logger.info(`Results from: ${this.results.map(s => s.source).join(',')}`)
@@ -327,11 +314,18 @@ export default class Complete {
 
   public resolveCompletionItem(item: VimCompleteItem): VimCompleteItem | null {
     let { results } = this
-    if (!results || !item.user_data) return null
+    if (!results) return null
     try {
-      let { source } = JSON.parse(item.user_data)
-      let result = results.find(res => res.source == source)
-      return result.items.find(o => o.user_data == item.user_data)
+      if (item.user_data) {
+        let { source } = JSON.parse(item.user_data)
+        let result = results.find(res => res.source == source)
+        return result.items.find(o => o.user_data == item.user_data)
+      }
+      for (let result of results) {
+        let res = result.items.find(o => o.abbr == item.abbr && o.info == item.info)
+        if (res) return res
+      }
+      return null
     } catch (e) {
       return null
     }

@@ -6,6 +6,7 @@ import extensions from '../extensions'
 import { IList, ListAction, ListContext, ListItem, ListOptions, Matcher } from '../types'
 import { disposeAll, wait } from '../util'
 import workspace from '../workspace'
+import Highlighter from '../model/highligher'
 import ListConfiguration from './configuration'
 import History from './history'
 import Mappings from './mappings'
@@ -22,6 +23,7 @@ import OutputList from './source/output'
 import ServicesList from './source/services'
 import SourcesList from './source/sources'
 import SymbolsList from './source/symbols'
+import ActionsList from './source/actions'
 import UI from './ui'
 import Worker from './worker'
 const logger = require('../util/logger')('list-manager')
@@ -37,6 +39,7 @@ export class ListManager implements Disposable {
   public worker: Worker
   private plugTs = 0
   private disposables: Disposable[] = []
+  private savedHeight: number
   private args: string[] = []
   private listArgs: string[] = []
   private charMap: Map<string, string>
@@ -71,21 +74,20 @@ export class ListManager implements Disposable {
         this.ui.hide()
         return
       }
-      let { isVim } = workspace
       let curr = await nvim.call('bufnr', '%')
       if (curr == bufnr) {
         this.prompt.start()
-        if (isVim) nvim.command(`set t_ve=`, true)
       } else {
         nvim.pauseNotification()
         this.prompt.cancel()
-        if (isVim) nvim.call('coc#list#restore', [], true)
         await nvim.resumeNotification()
       }
     }, 100), null, this.disposables)
     this.ui.onDidChangeLine(debounce(async () => {
       if (!this.activated) return
       let previewing = await nvim.call('coc#util#has_preview')
+      let mode = await this.nvim.mode
+      if (mode.blocking || mode.mode != 'n') return
       if (previewing) await this.doAction('preview')
     }, 100), null, this.disposables)
     this.ui.onDidLineChange(debounce(async () => {
@@ -100,12 +102,6 @@ export class ListManager implements Disposable {
         if (typeof this.currList.doHighlight == 'function') {
           this.currList.doHighlight()
         }
-        this.ui.window.notify('nvim_win_set_option', ['statusline', this.buildStatusline()])
-      }
-    }, null, this.disposables)
-    this.ui.onDidChange(() => {
-      if (this.currList) {
-        this.ui.window.notify('nvim_win_set_option', ['statusline', this.buildStatusline()])
       }
     }, null, this.disposables)
     this.ui.onDidClose(async () => {
@@ -115,9 +111,7 @@ export class ListManager implements Disposable {
       if (this.activated) {
         this.updateStatus()
       }
-      if (workspace.isNvim) {
-        this.prompt.drawPrompt()
-      }
+      this.prompt.drawPrompt()
     }, null, this.disposables)
     this.ui.onDidDoubleClick(async () => {
       await this.doAction()
@@ -129,7 +123,7 @@ export class ListManager implements Disposable {
         await this.ui.appendItems(items)
       } else {
         this.ui.addHighlights(highlights)
-        await this.ui.drawItems(items, this.name, this.listOptions.position, reload)
+        await this.ui.drawItems(items, this.name, this.listOptions, reload)
       }
     }, null, this.disposables)
 
@@ -145,14 +139,15 @@ export class ListManager implements Disposable {
     this.registerList(new OutputList(nvim))
     this.registerList(new ListsList(nvim, this.listMap))
     this.registerList(new FolderList(nvim))
+    this.registerList(new ActionsList(nvim))
   }
 
   public async start(args: string[]): Promise<void> {
     if (this.activated) return
     let res = this.parseArgs(args)
     if (!res) return
+    this.args = args
     this.activated = true
-    this.args = [...res.listOptions, res.list.name, ...res.listArgs]
     let { list, options, listArgs } = res
     try {
       this.reset()
@@ -160,16 +155,16 @@ export class ListManager implements Disposable {
       this.currList = list
       this.listArgs = listArgs
       this.cwd = workspace.cwd
-      this.window = await this.nvim.window
-      await this.nvim.command('nohlsearch')
       await this.getCharMap()
+      this.history.load()
+      this.window = await this.nvim.window
+      this.savedHeight = await this.window.height
       this.prompt.start(options)
-      await this.history.load()
       await this.worker.loadItems()
     } catch (e) {
       await this.cancel()
       let msg = e instanceof Error ? e.message : e.toString()
-      workspace.showMessage(`Error on "CocList ${list.name}" ${msg}`, 'error')
+      workspace.showMessage(`Error on "CocList ${list.name}": ${msg}`, 'error')
       logger.error(e)
     }
   }
@@ -180,7 +175,10 @@ export class ListManager implements Disposable {
     this.activated = true
     this.window = await nvim.window
     this.prompt.start()
-    await ui.resume(name, this.listOptions.position)
+    await ui.resume(name, this.listOptions)
+    if (this.listOptions.autoPreview) {
+      await this.doAction('preview')
+    }
   }
 
   public async doAction(name?: string): Promise<void> {
@@ -191,7 +189,13 @@ export class ListManager implements Disposable {
       workspace.showMessage(`Action ${name} not found`, 'error')
       return
     }
-    let items = await this.ui.getItems()
+    let items: ListItem[]
+    if (name == 'preview') {
+      let item = await this.ui.item
+      items = item ? [item] : []
+    } else {
+      items = await this.ui.getItems()
+    }
     if (items.length) await this.doItemAction(items, action)
   }
 
@@ -214,7 +218,7 @@ export class ListManager implements Disposable {
   }
 
   public async cancel(close = true): Promise<void> {
-    let { nvim, ui } = this
+    let { nvim, ui, savedHeight } = this
     if (!this.activated) {
       nvim.call('coc#list#stop_prompt', [], true)
       return
@@ -228,11 +232,9 @@ export class ListManager implements Disposable {
     if (close) {
       ui.hide()
       if (this.window) {
-        let valid = await this.window.valid
-        if (valid) nvim.call('win_gotoid', this.window.id, true)
+        nvim.call('coc#list#restore', [this.window.id, savedHeight], true)
       }
     }
-    nvim.call('coc#list#restore', [], true)
     await nvim.resumeNotification()
   }
 
@@ -297,7 +299,7 @@ export class ListManager implements Disposable {
     return this.currList
   }
 
-  public parseArgs(args: string[]): { list: IList, options: ListOptions, listOptions: string[], listArgs: string[] } | null {
+  public parseArgs(args: string[]): { list: IList, options: ListOptions, listArgs: string[] } | null {
     let options: string[] = []
     let interactive = false
     let autoPreview = false
@@ -305,6 +307,7 @@ export class ListManager implements Disposable {
     let name: string
     let input = ''
     let matcher: Matcher = 'fuzzy'
+    let position = 'bottom'
     let listArgs: string[] = []
     let listOptions: string[] = []
     for (let arg of args) {
@@ -337,7 +340,11 @@ export class ListManager implements Disposable {
         matcher = 'strict'
       } else if (opt == '--interactive' || opt == '-I') {
         interactive = true
-      } else if (opt == '--ignore-case' || opt == '--top' || opt == '--normal' || opt == '--no-sort') {
+      } else if (opt == '--top') {
+        position = 'top'
+      } else if (opt == '--tab') {
+        position = 'tab'
+      } else if (opt == '--ignore-case' || opt == '--normal' || opt == '--no-sort') {
         options.push(opt.slice(2))
       } else {
         workspace.showMessage(`Invalid option "${opt}" of list`, 'error')
@@ -350,21 +357,20 @@ export class ListManager implements Disposable {
       return null
     }
     if (interactive && !list.interactive) {
-      workspace.showMessage(`Interactive mode of "${name}" not supported`, 'error')
+      workspace.showMessage(`Interactive mode of "${name}" list not supported`, 'error')
       return null
     }
     return {
       list,
       listArgs,
-      listOptions,
       options: {
         numberSelect,
         autoPreview,
         input,
         interactive,
         matcher,
+        position,
         ignorecase: options.indexOf('ignore-case') != -1 ? true : false,
-        position: options.indexOf('top') == -1 ? 'bottom' : 'top',
         mode: options.indexOf('normal') == -1 ? 'insert' : 'normal',
         sort: options.indexOf('no-sort') == -1 ? true : false
       },
@@ -372,31 +378,18 @@ export class ListManager implements Disposable {
   }
 
   public updateStatus(): void {
-    let { ui, currList, listArgs, activated, nvim } = this
+    let { ui, currList, activated, nvim } = this
     if (!activated) return
     let buf = nvim.createBuffer(ui.bufnr)
     let status = {
       mode: this.prompt.mode.toUpperCase(),
-      args: listArgs.join(' '),
+      args: this.args.join(' '),
       name: currList.name,
       total: this.worker.length,
       cwd: this.cwd,
     }
     buf.setVar('list_status', status, true)
     if (ui.window) nvim.command('redraws', true)
-  }
-
-  private buildStatusline(): string {
-    let { args } = this
-    let parts: string[] = [
-      `%#CocListMode#-- %{coc#list#status('mode')} --%*`,
-      `%{get(g:, 'coc_list_loading_status', '')}`,
-      args.join(' '),
-      `(%L/%{coc#list#status('total')})`,
-      '%=',
-      `%#CocListPath# %{coc#list#status('cwd')} %l/%L%*`
-    ]
-    return parts.join(' ')
   }
 
   private async onInputChar(ch: string, charmod: number): Promise<void> {
@@ -456,7 +449,7 @@ export class ListManager implements Disposable {
       if (code == 65533) return
       // exclude control characer
       if (code < 32 || code >= 127 && code <= 159) return
-      this.prompt.insertCharacter(s)
+      await this.prompt.acceptCharacter(s)
     }
   }
 
@@ -486,21 +479,21 @@ export class ListManager implements Disposable {
   public async feedkeys(key: string): Promise<void> {
     let { nvim } = this
     key = key.startsWith('<') && key.endsWith('>') ? `\\${key}` : key
-    await nvim.call('coc#list#stop_prompt', [])
+    await nvim.call('coc#list#stop_prompt', [1])
     await nvim.eval(`feedkeys("${key}")`)
     this.prompt.start()
   }
 
   public async command(command: string): Promise<void> {
     let { nvim } = this
-    await nvim.call('coc#list#stop_prompt', [])
+    await nvim.call('coc#list#stop_prompt', [1])
     await nvim.command(command)
     this.prompt.start()
   }
 
   public async normal(command: string, bang = true): Promise<void> {
     let { nvim } = this
-    await nvim.call('coc#list#stop_prompt', [])
+    await nvim.call('coc#list#stop_prompt', [1])
     await nvim.command(`normal${bang ? '!' : ''} ${command}`)
     this.prompt.start()
   }
@@ -528,33 +521,37 @@ export class ListManager implements Disposable {
     await this.cancel()
     let { list, nvim } = this
     if (!list) return
-    let cmds: string[] = []
-    let echoHl = (msg: string, group: string) => {
-      cmds.push(`echohl ${group} | echon "${msg.replace(/"/g, '\\"')}\\n" | echohl None`)
-    }
-    echoHl('NAME', 'Label')
-    cmds.push(`echon "  ${list.name} - ${list.description || ''}\\n\\n"`)
-    echoHl('SYNOPSIS', 'Label')
-    cmds.push(`echon "  :CocList [LIST OPTIONS] ${list.name} [ARGUMENTS]\\n\\n"`)
+    let previewHeight = await nvim.eval('&previewheight')
+    nvim.pauseNotification()
+    nvim.command(`belowright ${previewHeight}sp +setl\\ previewwindow [LIST HELP]`, true)
+    nvim.command('setl nobuflisted noswapfile buftype=nofile bufhidden=wipe', true)
+    await nvim.resumeNotification()
+    let hasOptions = list.options && list.options.length
+    let buf = await nvim.buffer
+    let highligher = new Highlighter()
+    highligher.addLine('NAME', 'Label')
+    highligher.addLine(`  ${list.name} - ${list.description || ''}\n`)
+    highligher.addLine('SYNOPSIS', 'Label')
+    highligher.addLine(`  :CocList [LIST OPTIONS] ${list.name}${hasOptions ? ' [ARGUMENTS]' : ''}\n`)
     if (list.detail) {
-      echoHl('DESCRIPTION', 'Label')
+      highligher.addLine('DESCRIPTION', 'Label')
       let lines = list.detail.split('\n').map(s => '  ' + s)
-      cmds.push(`echon "${lines.join('\\n')}"`)
-      cmds.push(`echon "\\n"`)
+      highligher.addLine(lines.join('\n') + '\n')
     }
-    if (list.options) {
-      echoHl('ARGUMENTS', 'Label')
-      cmds.push(`echon "\\n"`)
+    if (hasOptions) {
+      highligher.addLine('ARGUMENTS', 'Label')
+      highligher.addLine('')
       for (let opt of list.options) {
-        echoHl(opt.name, 'Special')
-        cmds.push(`echon "  ${opt.description}"`)
-        cmds.push(`echon "\\n\\n"`)
+        highligher.addLine(opt.name, 'Special')
+        highligher.addLine(`  ${opt.description}`)
+        highligher.addLine('')
       }
+      highligher.addLine('')
     }
     let config = workspace.getConfiguration(`list.source.${list.name}`)
     if (Object.keys(config).length) {
-      echoHl('CONFIGURATIONS', 'Label')
-      cmds.push(`echon "\\n"`)
+      highligher.addLine('CONFIGURATIONS', 'Label')
+      highligher.addLine('')
       let props = {}
       extensions.all.forEach(extension => {
         let { packageJSON } = extension
@@ -573,21 +570,24 @@ export class ListManager implements Disposable {
       for (let key of Object.keys(config)) {
         let val = config[key]
         let name = `list.source.${list.name}.${key}`
-        let description = props[name] && props[name].description ? props[name].description : ''
-        cmds.push(`echohl MoreMsg | echon "'${name}'"| echohl None`)
-        cmds.push(`echon " - "`)
-        if (description) cmds.push(`echon "${description}, "`)
-        cmds.push(`echon "current value: ${JSON.stringify(val).replace(/"/g, '\\"')}"`)
-        cmds.push(`echon "\\n"`)
+        let description = props[name] && props[name].description ? props[name].description : key
+        highligher.addLine(`  "${name}"`, 'MoreMsg')
+        highligher.addText(` - ${description}, current value: `)
+        highligher.addText(JSON.stringify(val), 'Special')
       }
-      cmds.push(`echon "\\n"`)
+      highligher.addLine('')
     }
-    echoHl('ACTIONS', 'Label')
-    cmds.push(`echon "\\n"`)
-    cmds.push(`echon "  ${list.actions.map(o => o.name).join(', ')}\\n"`)
-    cmds.push(`echon "\\n"`)
-    cmds.push(`echon "see ':h coc-list--options' for available list options.\\n"`)
-    nvim.call('coc#util#execute', cmds.join('|'), true)
+    highligher.addLine('ACTIONS', 'Label')
+    highligher.addLine(`  ${list.actions.map(o => o.name).join(', ')}`)
+    highligher.addLine('')
+    highligher.addLine(`see ':h coc-list-options' for available list options.`, 'Comment')
+    nvim.pauseNotification()
+    highligher.render(buf, 0, -1)
+    nvim.command('setl nomod', true)
+    nvim.command('setl nomodifiable', true)
+    nvim.command('normal! gg', true)
+    nvim.command('nnoremap q :bd!<CR>', true)
+    await nvim.resumeNotification()
   }
 
   public get context(): ListContext {
@@ -621,7 +621,7 @@ export class ListManager implements Disposable {
       uniqueItems: true,
       items: {
         type: 'string',
-        enum: ['--top', '--normal', '--no-sort', '--input',
+        enum: ['--top', '--normal', '--no-sort', '--input', '--tab',
           '--strict', '--regex', '--ignore-case', '--number-select',
           '--interactive', '--auto-preview']
       }
@@ -678,29 +678,26 @@ export class ListManager implements Disposable {
     disposeAll(this.disposables)
   }
 
-  private async getCharMap(): Promise<Map<string, string>> {
-    if (this.charMap) return this.charMap
+  private async getCharMap(): Promise<void> {
+    if (this.charMap) return
     this.charMap = new Map()
     let chars = await this.nvim.call('coc#list#get_chars')
     Object.keys(chars).forEach(key => {
       this.charMap.set(chars[key], key)
     })
-    return this.charMap
+    return
   }
 
   private async doItemAction(items: ListItem[], action: ListAction): Promise<void> {
     if (this.executing) return
     this.executing = true
-    let { nvim, ui } = this
+    let { nvim } = this
     let shouldCancel = action.persist !== true && action.name != 'preview'
     try {
       if (shouldCancel) {
         await this.cancel()
-      } else {
+      } else if (action.name != 'preview') {
         await nvim.call('coc#list#stop_prompt')
-      }
-      if (action.name == 'preview') {
-        items = items.slice(0, 1)
       }
       if (!shouldCancel && !this.isActivated) return
       if (action.multiple) {
@@ -719,28 +716,20 @@ export class ListManager implements Disposable {
           this.nvim.command('pclose', true)
           return
         }
-        this.prompt.start()
-        let { window } = ui
-        if (!window) return
-        let valid = await window.valid
-        if (!valid) return
-        let winid = await nvim.call('win_getid')
-        if (winid != window.id) {
-          nvim.pauseNotification()
-          nvim.call('win_gotoid', [window.id], true)
-          await this.ui.restoreWindow()
-          nvim.command('redraw', true)
-          await nvim.resumeNotification()
-        } else {
-          await this.ui.restoreWindow()
+        nvim.pauseNotification()
+        if (action.name != 'preview') {
+          this.prompt.start()
         }
+        this.ui.restoreWindow()
+        nvim.resumeNotification(false, true).logError()
         if (action.reload) await this.worker.loadItems(true)
       }
     } catch (e) {
+      // tslint:disable-next-line: no-console
+      console.error(e)
       if (!shouldCancel && this.activated) {
         this.prompt.start()
       }
-      logger.error(e)
     }
     this.executing = false
   }

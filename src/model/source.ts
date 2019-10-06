@@ -1,6 +1,6 @@
 import { Neovim } from '@chemzqm/neovim'
+import { CancellationToken } from 'vscode-languageserver-protocol'
 import { CompleteOption, CompleteResult, ISource, SourceConfig, SourceType, VimCompleteItem } from '../types'
-import { fuzzyChar } from '../util/fuzzy'
 import { byteSlice } from '../util/string'
 import workspace from '../workspace'
 const logger = require('../util/logger')('model-source')
@@ -23,16 +23,20 @@ export default class Source implements ISource {
     this.defaults = option
   }
 
+  /**
+   * Priority of source, higher priority makes items lower index.
+   */
   public get priority(): number {
     return this.getConfig('priority', 1)
   }
 
+  /**
+   * When triggerOnly is true, not trigger completion on keyword character insert.
+   */
   public get triggerOnly(): boolean {
-    let triggerOnly = this.getDefault('triggerOnly', null)
-    if (triggerOnly != null) return triggerOnly
-    if (!this.triggerCharacters && !this.triggerPatterns) {
-      return false
-    }
+    let triggerOnly = this.defaults['triggerOnly']
+    if (typeof triggerOnly == 'boolean') return triggerOnly
+    if (!this.triggerCharacters && !this.triggerPatterns) return false
     return Array.isArray(this.triggerPatterns) && this.triggerPatterns.length != 0
   }
 
@@ -42,7 +46,7 @@ export default class Source implements ISource {
 
   // exists opitonnal function names for remote source
   public get optionalFns(): string[] {
-    return this.getDefault('optionalFns', [])
+    return this.defaults['optionalFns'] || []
   }
 
   public get triggerPatterns(): RegExp[] | null {
@@ -73,13 +77,8 @@ export default class Source implements ISource {
 
   public getConfig<T>(key: string, defaultValue?: T): T | null {
     let config = workspace.getConfiguration(`coc.source.${this.name}`)
-    return config.get(key, this.getDefault<T>(key, defaultValue))
-  }
-
-  private getDefault<T>(key: string, defaultValue?: T): T | null {
-    let { defaults } = this
-    if (defaults.hasOwnProperty(key)) return defaults[key]
-    return defaultValue == undefined ? null : defaultValue
+    defaultValue = this.defaults.hasOwnProperty(key) ? this.defaults[key] : defaultValue
+    return config.get(key, defaultValue)
   }
 
   public toggle(): void {
@@ -92,10 +91,14 @@ export default class Source implements ISource {
 
   public get menu(): string {
     let { shortcut } = this
-    return `[${shortcut.toUpperCase()}]`
+    return shortcut ? `[${shortcut}]` : ''
   }
 
+  /**
+   * Filter words that too short or doesn't match input
+   */
   protected filterWords(words: string[], opt: CompleteOption): string[] {
+    let { firstMatch } = this
     let res = []
     let { input } = opt
     let cword = opt.word
@@ -103,7 +106,8 @@ export default class Source implements ISource {
     let cFirst = input[0]
     for (let word of words) {
       if (!word || word.length < 3) continue
-      if (cFirst && !fuzzyChar(cFirst, word[0])) continue
+      if (firstMatch && cFirst != word[0]) continue
+      if (!firstMatch && cFirst.toLowerCase() != word[0].toLowerCase()) continue
       if (word == cword || word == input) continue
       res.push(word)
     }
@@ -143,24 +147,24 @@ export default class Source implements ISource {
     if (disableSyntaxes && disableSyntaxes.length && disableSyntaxes.findIndex(s => synname.indexOf(s.toLowerCase()) != -1) !== -1) {
       return false
     }
-    let fn = this.getDefault<Function>('shouldComplete')
+    let fn = this.defaults['shouldComplete']
     if (fn) return await Promise.resolve(fn.call(this, opt))
     return true
   }
 
   public async refresh(): Promise<void> {
-    let fn = this.getDefault<Function>('refresh')
+    let fn = this.defaults['refresh']
     if (fn) await Promise.resolve(fn.call(this))
   }
 
   public async onCompleteDone(item: VimCompleteItem, opt: CompleteOption): Promise<void> {
-    let fn = this.getDefault<Function>('onCompleteDone')
+    let fn = this.defaults['onCompleteDone']
     if (fn) await Promise.resolve(fn.call(this, item, opt))
   }
 
-  public async doComplete(opt: CompleteOption): Promise<CompleteResult | null> {
-    let fn = this.getDefault<Function>('doComplete')
-    if (fn) return await Promise.resolve(fn.call(this, opt))
+  public async doComplete(opt: CompleteOption, token: CancellationToken): Promise<CompleteResult | null> {
+    let fn = this.defaults['doComplete']
+    if (fn) return await Promise.resolve(fn.call(this, opt, token))
     return null
   }
 }
